@@ -4,6 +4,7 @@ import folium
 import streamlit as st
 from streamlit_folium import st_folium
 from geopy.geocoders import Nominatim
+from google.oauth2.service_account import Credentials
 
 st.set_page_config(page_title="RiskEye", page_icon="🛰️", layout="wide")
 
@@ -17,10 +18,11 @@ st.markdown("""
 
 @st.cache_resource
 def init_ee():
-    ee.Initialize(project='heirs-risk-ai')
+    service_account_info = dict(st.secrets["gcp_service_account"])
+    credentials = Credentials.from_service_account_info(service_account_info)
+    ee.Initialize(credentials=credentials, project='heirs-risk-ai')
 
 init_ee()
-
 
 def clean_address(address):
     patterns_to_remove = [
