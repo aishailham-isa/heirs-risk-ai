@@ -70,7 +70,7 @@ def run_assessment(latitude, longitude, resolved_address):
     collection = (
         ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
         .filterBounds(area)
-        .filterDate('2026-01-01', '2026-08-19')
+        .filterDate('2026-01-01', '2026-08-20')
         .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 15))
         .sort('CLOUDY_PIXEL_PERCENTAGE')
     )
@@ -125,6 +125,15 @@ def run_assessment(latitude, longitude, resolved_address):
     }
     surroundings = landcover_labels.get(landcover_code, "Unknown")
 
+    built_mask = worldcover.eq(50)
+    pixel_area = ee.Image.pixelArea()
+    built_area_img = built_mask.multiply(pixel_area)
+    built_area_stats = built_area_img.reduceRegion(
+        reducer=ee.Reducer.sum(), geometry=area, scale=10, maxPixels=1e9
+    ).getInfo()
+    estimated_built_sqm = list(built_area_stats.values())[0] if built_area_stats else 0
+    estimated_built_sqm = round(estimated_built_sqm, 0) if estimated_built_sqm else 0
+
     overall_score = max(score_of(flood_risk), score_of(terrain_risk))
     overall_label = {1: "LOW", 2: "MEDIUM", 3: "HIGH"}[overall_score]
     recommendation = "Physical inspection advised" if overall_score >= 2 else "Remote screening sufficient"
@@ -134,6 +143,7 @@ def run_assessment(latitude, longitude, resolved_address):
         "flood_risk": flood_risk, "terrain_risk": terrain_risk, "surroundings": surroundings,
         "overall_label": overall_label, "recommendation": recommendation,
         "best_image": best_image, "area": area, "latitude": latitude, "longitude": longitude,
+        "estimated_built_sqm": estimated_built_sqm,
     }
 
 
@@ -150,6 +160,16 @@ with st.expander("Enter coordinates manually instead"):
         manual_lat = st.text_input("Latitude")
     with col2:
         manual_lon = st.text_input("Longitude")
+
+st.write("")
+st.subheader("Sum Insured Check (optional)")
+st.caption("Enter the declared property value to check for possible underinsurance. This is an indicative estimate, not a certified valuation.")
+
+col3, col4 = st.columns(2)
+with col3:
+    declared_value = st.number_input("Declared value (₦)", min_value=0, step=1000000, value=0)
+with col4:
+    cost_per_sqm = st.number_input("Construction cost benchmark (₦/sqm)", min_value=0, step=10000, value=400000)
 
 run_clicked = st.button("Run Risk Assessment", type="primary", use_container_width=False)
 st.write("")
@@ -175,6 +195,8 @@ if run_clicked:
         if result is None:
             st.error("No clear satellite image found for this location.")
         else:
+            result["declared_value"] = declared_value
+            result["cost_per_sqm"] = cost_per_sqm
             st.session_state.result = result
 
 if "result" in st.session_state and st.session_state.result:
@@ -199,6 +221,37 @@ if "result" in st.session_state and st.session_state.result:
 
     st.write("")
     st.info(f"**Recommendation:** {result['recommendation']}")
+
+    if result.get("declared_value", 0) > 0:
+        st.write("")
+        st.subheader("Sum Insured Check")
+
+        estimated_sqm = result["estimated_built_sqm"]
+        estimated_cost = estimated_sqm * result["cost_per_sqm"]
+
+        sc1, sc2, sc3 = st.columns(3)
+        sc1.metric("Estimated built-up area", f"{estimated_sqm:,.0f} sqm")
+        sc2.metric("Estimated replacement cost", f"₦{estimated_cost:,.0f}")
+        sc3.metric("Declared value", f"₦{result['declared_value']:,.0f}")
+
+        if estimated_cost > 0:
+            gap = estimated_cost - result["declared_value"]
+            gap_pct = (gap / estimated_cost) * 100 if estimated_cost else 0
+
+            if gap_pct > 20:
+                st.warning(
+                    f"**Possible underinsurance:** declared value is approximately "
+                    f"{gap_pct:.0f}% below the estimated replacement cost "
+                    f"(≈₦{gap:,.0f} gap). Recommend a proper valuation."
+                )
+            else:
+                st.success("Declared value appears broadly consistent with the estimated replacement cost.")
+
+        st.caption(
+            "This is an indicative estimate based on satellite-derived built-up area and a general "
+            "construction cost benchmark — not a certified valuation. Actual replacement cost should "
+            "be confirmed by a qualified quantity surveyor."
+        )
 
     st.write("")
     st.subheader("Satellite View")
