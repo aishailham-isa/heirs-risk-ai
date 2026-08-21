@@ -66,11 +66,12 @@ def run_assessment(latitude, longitude, resolved_address):
     point = ee.Geometry.Point([longitude, latitude])
     area = point.buffer(500)
     search_area = point.buffer(1000)
+    footprint_area = point.buffer(30) # small radius for building footprint estimate only
 
     collection = (
         ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
         .filterBounds(area)
-        .filterDate('2026-01-01', '2026-08-20')
+        .filterDate('2026-01-01', '2026-08-21')
         .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 15))
         .sort('CLOUDY_PIXEL_PERCENTAGE')
     )
@@ -125,11 +126,12 @@ def run_assessment(latitude, longitude, resolved_address):
     }
     surroundings = landcover_labels.get(landcover_code, "Unknown")
 
+    # Building footprint estimate — small radius, capped at the footprint zone's own area
     built_mask = worldcover.eq(50)
     pixel_area = ee.Image.pixelArea()
     built_area_img = built_mask.multiply(pixel_area)
     built_area_stats = built_area_img.reduceRegion(
-        reducer=ee.Reducer.sum(), geometry=area, scale=10, maxPixels=1e9
+        reducer=ee.Reducer.sum(), geometry=footprint_area, scale=10, maxPixels=1e9
     ).getInfo()
     estimated_built_sqm = list(built_area_stats.values())[0] if built_area_stats else 0
     estimated_built_sqm = round(estimated_built_sqm, 0) if estimated_built_sqm else 0
@@ -163,7 +165,7 @@ with st.expander("Enter coordinates manually instead"):
 
 st.write("")
 st.subheader("Sum Insured Check (optional)")
-st.caption("Enter the declared property value to check for possible underinsurance. This is an indicative estimate, not a certified valuation.")
+st.caption("Enter the declared property value to check for possible underinsurance. Built-up area is estimated from a small radius around the point and is indicative only — not a certified valuation.")
 
 col3, col4 = st.columns(2)
 with col3:
@@ -236,7 +238,7 @@ if "result" in st.session_state and st.session_state.result:
 
         if estimated_cost > 0:
             gap = estimated_cost - result["declared_value"]
-            gap_pct = (gap / estimated_cost) * 100 if estimated_cost else 0
+            gap_pct = max(min((gap / estimated_cost) * 100, 100), -100) if estimated_cost else 0
 
             if gap_pct > 20:
                 st.warning(
@@ -244,13 +246,15 @@ if "result" in st.session_state and st.session_state.result:
                     f"{gap_pct:.0f}% below the estimated replacement cost "
                     f"(≈₦{gap:,.0f} gap). Recommend a proper valuation."
                 )
+            elif gap_pct < -20:
+                st.info("Declared value appears higher than the estimated replacement cost — worth reviewing for over-insurance.")
             else:
                 st.success("Declared value appears broadly consistent with the estimated replacement cost.")
 
         st.caption(
-            "This is an indicative estimate based on satellite-derived built-up area and a general "
-            "construction cost benchmark — not a certified valuation. Actual replacement cost should "
-            "be confirmed by a qualified quantity surveyor."
+            "This is a rough, indicative estimate based on satellite-derived built-up area within a small "
+            "radius of the point, and a general construction cost benchmark — not a certified valuation. "
+            "Actual replacement cost should be confirmed by a qualified quantity surveyor."
         )
 
     st.write("")
