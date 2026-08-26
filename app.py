@@ -51,18 +51,43 @@ def clean_address(address):
     return cleaned
 
 
+def geocode_with_google(address, api_key):
+    url = "https://maps.googleapis.com/maps/api/geocode/json"
+    params = {"address": address, "key": api_key}
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        data = response.json()
+        if data.get("status") == "OK" and data.get("results"):
+            result = data["results"][0]
+            lat = result["geometry"]["location"]["lat"]
+            lng = result["geometry"]["location"]["lng"]
+            formatted_address = result["formatted_address"]
+            return lat, lng, formatted_address
+    except Exception:
+        pass
+    return None, None, None
+
+
 def geocode_address(address):
     geolocator = Nominatim(user_agent="riskeye-app")
     location = geolocator.geocode(address)
     if location:
-        return location.latitude, location.longitude, location.address
+        return location.latitude, location.longitude, location.address, "free (OpenStreetMap)"
 
     cleaned = clean_address(address)
     if cleaned != address:
         location = geolocator.geocode(cleaned)
         if location:
-            return location.latitude, location.longitude, location.address
-    return None, None, None
+            return location.latitude, location.longitude, location.address, "free (OpenStreetMap)"
+
+    # Fallback to Google Geocoding if available
+    if "gcp_static_maps" in st.secrets:
+        api_key = st.secrets["gcp_static_maps"]["api_key"]
+        lat, lng, formatted_address = geocode_with_google(address, api_key)
+        if lat is not None:
+            return lat, lng, formatted_address, "Google (paid tier)"
+
+    return None, None, None, None
 
 
 def score_of(risk_text):
@@ -163,17 +188,30 @@ def run_assessment(latitude, longitude, resolved_address):
     terrain_score = score_of(terrain_risk)
     overall_score = max(flood_score, terrain_score)
     overall_label = {1: "LOW", 2: "MEDIUM", 3: "HIGH"}[overall_score]
-
-    # Simple percentage: average of the two factor scores, scaled to 0-100
     overall_percent = round(((flood_score + terrain_score) / 2) / 3 * 100)
 
     recommendation = "Physical inspection advised" if overall_score >= 2 else "Remote screening sufficient"
+
+    # --- Per-factor recommended actions (location-based only) ---
+    actions = []
+    if flood_risk == "High":
+        actions.append("Flood exposure is high: recommend flood barriers, elevated foundations, or improved drainage before binding cover.")
+    elif flood_risk == "Medium":
+        actions.append("Moderate flood exposure: recommend confirming drainage adequacy during inspection.")
+
+    if terrain_risk.startswith("High"):
+        actions.append("Steep terrain detected: recommend erosion control and a structural/foundation assessment.")
+    elif terrain_risk.startswith("Low"):
+        actions.append("Very flat terrain: recommend checking drainage, as flat land can pool water during heavy rain.")
+
+    if not actions:
+        actions.append("No significant location-based concerns detected from available data.")
 
     return {
         "resolved_address": resolved_address, "image_date": image_date, "cloud_pct": cloud_pct,
         "flood_risk": flood_risk, "terrain_risk": terrain_risk, "surroundings": surroundings,
         "overall_label": overall_label, "overall_percent": overall_percent,
-        "recommendation": recommendation,
+        "recommendation": recommendation, "actions": actions,
         "best_image": best_image, "area": area, "latitude": latitude, "longitude": longitude,
         "estimated_built_sqm": estimated_built_sqm, "overall_score": overall_score,
     }
@@ -214,15 +252,16 @@ if run_clicked:
 
     if manual_lat and manual_lon:
         latitude, longitude, resolved_address = float(manual_lat), float(manual_lon), "Manually entered coordinates"
+        geocode_source = "manual entry"
     elif address:
         with st.spinner("Looking up address..."):
-            latitude, longitude, resolved_address = geocode_address(address)
+            latitude, longitude, resolved_address, geocode_source = geocode_address(address)
     else:
         st.warning("Please enter an address or coordinates.")
         st.stop()
 
     if latitude is None:
-        st.error("Could not find that address. Try a simpler version, or enter coordinates manually above.")
+        st.error("Could not find that address, even with the extended lookup. Try entering coordinates manually above.")
     else:
         with st.spinner("Analyzing satellite imagery and risk factors..."):
             result = run_assessment(latitude, longitude, resolved_address)
@@ -233,6 +272,7 @@ if run_clicked:
             result["declared_value"] = declared_value
             result["cost_per_sqm"] = cost_per_sqm
             result["building_type"] = building_type
+            result["geocode_source"] = geocode_source
             st.session_state.result = result
 
 if "result" in st.session_state and st.session_state.result:
@@ -245,7 +285,7 @@ if "result" in st.session_state and st.session_state.result:
     top_col1, top_col2 = st.columns([2, 1])
     with top_col1:
         st.write(f"**Location:** {result['resolved_address']}")
-        st.caption(f"Satellite image date: {result['image_date']} • Cloud coverage: {result['cloud_pct']}%")
+        st.caption(f"Satellite image date: {result['image_date']} • Cloud coverage: {result['cloud_pct']}% • Location source: {result.get('geocode_source', 'n/a')}")
     with top_col2:
         st.markdown(f"#### Overall Risk: :{risk_color}[{result['overall_label']} ({result['overall_percent']}%)]")
 
@@ -258,14 +298,27 @@ if "result" in st.session_state and st.session_state.result:
     st.write("")
     st.info(f"**Recommendation:** {result['recommendation']}")
 
-    if result.get("overall_score", 1) >= 2 and "gcp_static_maps" in st.secrets:
-        st.write("")
-        st.subheader("Close-Up View")
-        st.caption("A sharper close-up image is shown for properties flagged Medium/High risk.")
-        api_key = st.secrets["gcp_static_maps"]["api_key"]
-        image_bytes = get_static_map_image(result["latitude"], result["longitude"], api_key)
-        if image_bytes:
-            st.image(image_bytes, caption="Google satellite close-up (single image, not interactive)")
+    st.write("")
+    st.subheader("Recommended Actions")
+    st.caption("Based on location risk factors only — building-specific issues (roof, wiring, structure) require a physical or drone inspection.")
+    for action in result["actions"]:
+        st.markdown(f"- {action}")
+
+    st.write("")
+    st.subheader("Close-Up View")
+    if result.get("overall_score", 1) >= 2:
+        if "gcp_static_maps" in st.secrets:
+            st.caption("Sharper close-up shown because this property is flagged Medium/High risk.")
+            api_key = st.secrets["gcp_static_maps"]["api_key"]
+            image_bytes = get_static_map_image(result["latitude"], result["longitude"], api_key)
+            if image_bytes:
+                st.image(image_bytes, caption="Google satellite close-up (single image, not interactive)")
+            else:
+                st.caption("Close-up image could not be retrieved for this location.")
+        else:
+            st.caption("Close-up imagery is not configured for this deployment.")
+    else:
+        st.caption("Close-up image is only shown for properties flagged Medium or High risk (this one is Low).")
 
     if result.get("declared_value", 0) > 0:
         st.write("")
@@ -298,8 +351,7 @@ if "result" in st.session_state and st.session_state.result:
         st.caption(
             "This is a rough, indicative estimate: built-up area is measured from satellite imagery "
             "(an aerial footprint, not a ground survey or floor count), combined with a general construction "
-            "cost benchmark for the selected building type. Not a certified valuation — actual replacement "
-            "cost should be confirmed by a qualified quantity surveyor."
+            "cost benchmark for the selected building type. Not a certified valuation."
         )
 
     st.write("")
