@@ -3,6 +3,7 @@ import ee
 import folium
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from streamlit_folium import st_folium
 from geopy.geocoders import Nominatim
 
@@ -80,7 +81,6 @@ def geocode_address(address):
         if location:
             return location.latitude, location.longitude, location.address, "free (OpenStreetMap)"
 
-    # Fallback to Google Geocoding if available
     if "gcp_static_maps" in st.secrets:
         api_key = st.secrets["gcp_static_maps"]["api_key"]
         lat, lng, formatted_address = geocode_with_google(address, api_key)
@@ -109,6 +109,26 @@ def get_static_map_image(lat, lon, api_key):
     if response.status_code == 200:
         return response.content
     return None
+
+
+def render_interactive_google_map(lat, lon, api_key, height=550):
+    html = f"""
+    <div id="map" style="height:{height}px;width:100%;"></div>
+    <script src="https://maps.googleapis.com/maps/api/js?key={api_key}"></script>
+    <script>
+      function initMap() {{
+        var location = {{ lat: {lat}, lng: {lon} }};
+        var map = new google.maps.Map(document.getElementById("map"), {{
+          zoom: 18,
+          center: location,
+          mapTypeId: "satellite",
+        }});
+        new google.maps.Marker({{ position: location, map: map }});
+      }}
+      window.onload = initMap;
+    </script>
+    """
+    components.html(html, height=height)
 
 
 def run_assessment(latitude, longitude, resolved_address):
@@ -192,7 +212,6 @@ def run_assessment(latitude, longitude, resolved_address):
 
     recommendation = "Physical inspection advised" if overall_score >= 2 else "Remote screening sufficient"
 
-    # --- Per-factor recommended actions (location-based only) ---
     actions = []
     if flood_risk == "High":
         actions.append("Flood exposure is high: recommend flood barriers, elevated foundations, or improved drainage before binding cover.")
@@ -308,13 +327,25 @@ if "result" in st.session_state and st.session_state.result:
     st.subheader("Close-Up View")
     if result.get("overall_score", 1) >= 2:
         if "gcp_static_maps" in st.secrets:
-            st.caption("Sharper close-up shown because this property is flagged Medium/High risk.")
             api_key = st.secrets["gcp_static_maps"]["api_key"]
-            image_bytes = get_static_map_image(result["latitude"], result["longitude"], api_key)
-            if image_bytes:
-                st.image(image_bytes, caption="Google satellite close-up (single image, not interactive)")
+
+            view_mode = st.radio(
+                "View mode",
+                ["Interactive (pan/zoom)", "Static image"],
+                horizontal=True,
+                key="view_mode_radio",
+            )
+
+            if view_mode == "Interactive (pan/zoom)":
+                st.caption("Interactive Google satellite map — you can pan and zoom directly.")
+                render_interactive_google_map(result["latitude"], result["longitude"], api_key)
             else:
-                st.caption("Close-up image could not be retrieved for this location.")
+                st.caption("Sharper close-up shown because this property is flagged Medium/High risk.")
+                image_bytes = get_static_map_image(result["latitude"], result["longitude"], api_key)
+                if image_bytes:
+                    st.image(image_bytes, caption="Google satellite close-up (single image, not interactive)")
+                else:
+                    st.caption("Close-up image could not be retrieved for this location.")
         else:
             st.caption("Close-up imagery is not configured for this deployment.")
     else:
@@ -351,11 +382,12 @@ if "result" in st.session_state and st.session_state.result:
         st.caption(
             "This is a rough, indicative estimate: built-up area is measured from satellite imagery "
             "(an aerial footprint, not a ground survey or floor count), combined with a general construction "
-            "cost benchmark for the selected building type. Not a certified valuation."
+            "cost benchmark for the selected building type (structure only — excludes machinery, equipment, "
+            "and fittings). Not a certified valuation."
         )
 
     st.write("")
-    st.subheader("Satellite View")
+    st.subheader("Satellite View (Sentinel-2)")
     st.caption("Zoom using the + / − controls on the map, or scroll while hovering over it. Sentinel-2 imagery has ~10m resolution, so individual buildings will appear blocky rather than sharp.")
 
     m = folium.Map(location=[result["latitude"], result["longitude"]], zoom_start=17, max_zoom=20)
