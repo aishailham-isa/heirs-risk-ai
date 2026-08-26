@@ -1,6 +1,7 @@
 import re
 import ee
 import folium
+import requests
 import streamlit as st
 from streamlit_folium import st_folium
 from geopy.geocoders import Nominatim
@@ -27,6 +28,13 @@ def init_ee():
 
 
 init_ee()
+
+BUILDING_COST_BENCHMARKS = {
+    "Residential": 250000,
+    "Commercial / Office": 350000,
+    "Warehouse / Industrial": 200000,
+    "High-end / Luxury": 500000,
+}
 
 
 def clean_address(address):
@@ -62,16 +70,32 @@ def score_of(risk_text):
     return risk_levels.get(risk_text.split(" ")[0], 1)
 
 
+def get_static_map_image(lat, lon, api_key):
+    url = "https://maps.googleapis.com/maps/api/staticmap"
+    params = {
+        "center": f"{lat},{lon}",
+        "zoom": 19,
+        "size": "640x400",
+        "maptype": "satellite",
+        "markers": f"color:red|{lat},{lon}",
+        "key": api_key,
+    }
+    response = requests.get(url, params=params, timeout=10)
+    if response.status_code == 200:
+        return response.content
+    return None
+
+
 def run_assessment(latitude, longitude, resolved_address):
     point = ee.Geometry.Point([longitude, latitude])
     area = point.buffer(500)
     search_area = point.buffer(1000)
-    footprint_area = point.buffer(30) # small radius for building footprint estimate only
+    footprint_area = point.buffer(30)
 
     collection = (
         ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
         .filterBounds(area)
-        .filterDate('2026-01-01', '2026-08-21')
+        .filterDate('2026-01-01', '2026-08-26')
         .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 15))
         .sort('CLOUDY_PIXEL_PERCENTAGE')
     )
@@ -126,7 +150,6 @@ def run_assessment(latitude, longitude, resolved_address):
     }
     surroundings = landcover_labels.get(landcover_code, "Unknown")
 
-    # Building footprint estimate — small radius, capped at the footprint zone's own area
     built_mask = worldcover.eq(50)
     pixel_area = ee.Image.pixelArea()
     built_area_img = built_mask.multiply(pixel_area)
@@ -136,16 +159,23 @@ def run_assessment(latitude, longitude, resolved_address):
     estimated_built_sqm = list(built_area_stats.values())[0] if built_area_stats else 0
     estimated_built_sqm = round(estimated_built_sqm, 0) if estimated_built_sqm else 0
 
-    overall_score = max(score_of(flood_risk), score_of(terrain_risk))
+    flood_score = score_of(flood_risk)
+    terrain_score = score_of(terrain_risk)
+    overall_score = max(flood_score, terrain_score)
     overall_label = {1: "LOW", 2: "MEDIUM", 3: "HIGH"}[overall_score]
+
+    # Simple percentage: average of the two factor scores, scaled to 0-100
+    overall_percent = round(((flood_score + terrain_score) / 2) / 3 * 100)
+
     recommendation = "Physical inspection advised" if overall_score >= 2 else "Remote screening sufficient"
 
     return {
         "resolved_address": resolved_address, "image_date": image_date, "cloud_pct": cloud_pct,
         "flood_risk": flood_risk, "terrain_risk": terrain_risk, "surroundings": surroundings,
-        "overall_label": overall_label, "recommendation": recommendation,
+        "overall_label": overall_label, "overall_percent": overall_percent,
+        "recommendation": recommendation,
         "best_image": best_image, "area": area, "latitude": latitude, "longitude": longitude,
-        "estimated_built_sqm": estimated_built_sqm,
+        "estimated_built_sqm": estimated_built_sqm, "overall_score": overall_score,
     }
 
 
@@ -165,13 +195,16 @@ with st.expander("Enter coordinates manually instead"):
 
 st.write("")
 st.subheader("Sum Insured Check (optional)")
-st.caption("Enter the declared property value to check for possible underinsurance. Built-up area is estimated from a small radius around the point and is indicative only — not a certified valuation.")
+st.caption("Select the building type and enter the declared value to check for possible underinsurance. This is an indicative estimate, not a certified valuation.")
 
-col3, col4 = st.columns(2)
+col3, col4, col5 = st.columns(3)
 with col3:
     declared_value = st.number_input("Declared value (₦)", min_value=0, step=1000000, value=0)
 with col4:
-    cost_per_sqm = st.number_input("Construction cost benchmark (₦/sqm)", min_value=0, step=10000, value=400000)
+    building_type = st.selectbox("Building type", list(BUILDING_COST_BENCHMARKS.keys()))
+with col5:
+    default_cost = BUILDING_COST_BENCHMARKS[building_type]
+    cost_per_sqm = st.number_input("Cost benchmark (₦/sqm)", min_value=0, step=10000, value=default_cost)
 
 run_clicked = st.button("Run Risk Assessment", type="primary", use_container_width=False)
 st.write("")
@@ -199,6 +232,7 @@ if run_clicked:
         else:
             result["declared_value"] = declared_value
             result["cost_per_sqm"] = cost_per_sqm
+            result["building_type"] = building_type
             st.session_state.result = result
 
 if "result" in st.session_state and st.session_state.result:
@@ -213,7 +247,7 @@ if "result" in st.session_state and st.session_state.result:
         st.write(f"**Location:** {result['resolved_address']}")
         st.caption(f"Satellite image date: {result['image_date']} • Cloud coverage: {result['cloud_pct']}%")
     with top_col2:
-        st.markdown(f"#### Overall Risk: :{risk_color}[{result['overall_label']}]")
+        st.markdown(f"#### Overall Risk: :{risk_color}[{result['overall_label']} ({result['overall_percent']}%)]")
 
     st.write("")
     c1, c2, c3 = st.columns(3)
@@ -224,6 +258,15 @@ if "result" in st.session_state and st.session_state.result:
     st.write("")
     st.info(f"**Recommendation:** {result['recommendation']}")
 
+    if result.get("overall_score", 1) >= 2 and "gcp_static_maps" in st.secrets:
+        st.write("")
+        st.subheader("Close-Up View")
+        st.caption("A sharper close-up image is shown for properties flagged Medium/High risk.")
+        api_key = st.secrets["gcp_static_maps"]["api_key"]
+        image_bytes = get_static_map_image(result["latitude"], result["longitude"], api_key)
+        if image_bytes:
+            st.image(image_bytes, caption="Google satellite close-up (single image, not interactive)")
+
     if result.get("declared_value", 0) > 0:
         st.write("")
         st.subheader("Sum Insured Check")
@@ -231,10 +274,11 @@ if "result" in st.session_state and st.session_state.result:
         estimated_sqm = result["estimated_built_sqm"]
         estimated_cost = estimated_sqm * result["cost_per_sqm"]
 
-        sc1, sc2, sc3 = st.columns(3)
-        sc1.metric("Estimated built-up area", f"{estimated_sqm:,.0f} sqm")
-        sc2.metric("Estimated replacement cost", f"₦{estimated_cost:,.0f}")
-        sc3.metric("Declared value", f"₦{result['declared_value']:,.0f}")
+        sc1, sc2, sc3, sc4 = st.columns(4)
+        sc1.metric("Building type", result["building_type"])
+        sc2.metric("Estimated built-up area", f"{estimated_sqm:,.0f} sqm")
+        sc3.metric("Estimated replacement cost", f"₦{estimated_cost:,.0f}")
+        sc4.metric("Declared value", f"₦{result['declared_value']:,.0f}")
 
         if estimated_cost > 0:
             gap = estimated_cost - result["declared_value"]
@@ -252,9 +296,10 @@ if "result" in st.session_state and st.session_state.result:
                 st.success("Declared value appears broadly consistent with the estimated replacement cost.")
 
         st.caption(
-            "This is a rough, indicative estimate based on satellite-derived built-up area within a small "
-            "radius of the point, and a general construction cost benchmark — not a certified valuation. "
-            "Actual replacement cost should be confirmed by a qualified quantity surveyor."
+            "This is a rough, indicative estimate: built-up area is measured from satellite imagery "
+            "(an aerial footprint, not a ground survey or floor count), combined with a general construction "
+            "cost benchmark for the selected building type. Not a certified valuation — actual replacement "
+            "cost should be confirmed by a qualified quantity surveyor."
         )
 
     st.write("")
