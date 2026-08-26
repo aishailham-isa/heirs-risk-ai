@@ -111,6 +111,30 @@ def get_static_map_image(lat, lon, api_key):
     return None
 
 
+def get_street_view_image(lat, lon, api_key):
+    metadata_url = "https://maps.googleapis.com/maps/api/streetview/metadata"
+    params = {"location": f"{lat},{lon}", "key": api_key}
+    try:
+        response = requests.get(metadata_url, params=params, timeout=10)
+        metadata = response.json()
+    except Exception:
+        return None, "REQUEST_FAILED"
+
+    if metadata.get("status") != "OK":
+        return None, metadata.get("status", "UNKNOWN")
+
+    image_url = "https://maps.googleapis.com/maps/api/streetview"
+    image_params = {
+        "size": "640x400",
+        "location": f"{lat},{lon}",
+        "key": api_key,
+    }
+    image_response = requests.get(image_url, params=image_params, timeout=10)
+    if image_response.status_code == 200:
+        return image_response.content, "OK"
+    return None, "FETCH_FAILED"
+
+
 def render_interactive_google_map(lat, lon, api_key, height=550):
     html = f"""
     <div id="map" style="height:{height}px;width:100%;"></div>
@@ -331,7 +355,7 @@ if "result" in st.session_state and st.session_state.result:
 
             view_mode = st.radio(
                 "View mode",
-                ["Interactive (pan/zoom)", "Static image"],
+                ["Interactive (pan/zoom)", "Static image", "Street View (if available)"],
                 horizontal=True,
                 key="view_mode_radio",
             )
@@ -339,13 +363,23 @@ if "result" in st.session_state and st.session_state.result:
             if view_mode == "Interactive (pan/zoom)":
                 st.caption("Interactive Google satellite map — you can pan and zoom directly.")
                 render_interactive_google_map(result["latitude"], result["longitude"], api_key)
-            else:
+            elif view_mode == "Static image":
                 st.caption("Sharper close-up shown because this property is flagged Medium/High risk.")
                 image_bytes = get_static_map_image(result["latitude"], result["longitude"], api_key)
                 if image_bytes:
                     st.image(image_bytes, caption="Google satellite close-up (single image, not interactive)")
                 else:
                     st.caption("Close-up image could not be retrieved for this location.")
+            elif view_mode == "Street View (if available)":
+                image_bytes, sv_status = get_street_view_image(result["latitude"], result["longitude"], api_key)
+                if image_bytes:
+                    st.image(image_bytes, caption="Google Street View (ground-level)")
+                else:
+                    st.warning(
+                        f"No Street View imagery available for this location (status: {sv_status}). "
+                        "This is common outside major Nigerian city centers, since Google's Street View "
+                        "cars have limited coverage in Nigeria."
+                    )
         else:
             st.caption("Close-up imagery is not configured for this deployment.")
     else:
