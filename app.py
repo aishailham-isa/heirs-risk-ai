@@ -71,15 +71,22 @@ def geocode_with_google(address, api_key):
 
 def geocode_address(address):
     geolocator = Nominatim(user_agent="riskeye-app")
-    location = geolocator.geocode(address)
-    if location:
-        return location.latitude, location.longitude, location.address, "free (OpenStreetMap)"
+
+    try:
+        location = geolocator.geocode(address, timeout=5)
+        if location:
+            return location.latitude, location.longitude, location.address, "free (OpenStreetMap)"
+    except Exception:
+        location = None
 
     cleaned = clean_address(address)
     if cleaned != address:
-        location = geolocator.geocode(cleaned)
-        if location:
-            return location.latitude, location.longitude, location.address, "free (OpenStreetMap)"
+        try:
+            location = geolocator.geocode(cleaned, timeout=5)
+            if location:
+                return location.latitude, location.longitude, location.address, "free (OpenStreetMap)"
+        except Exception:
+            pass
 
     if "gcp_static_maps" in st.secrets:
         api_key = st.secrets["gcp_static_maps"]["api_key"]
@@ -88,6 +95,7 @@ def geocode_address(address):
             return lat, lng, formatted_address, "Google (paid tier)"
 
     return None, None, None, None
+
 
 
 def score_of(risk_text):
