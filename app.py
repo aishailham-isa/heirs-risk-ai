@@ -176,22 +176,28 @@ def query_overpass_count(lat, lon, radius_m, key, value):
     );
     out ids;
     """
-    try:
-        response = requests.post(
-            "https://overpass-api.de/api/interpreter",
-            data={"data": query},
-            timeout=20
-        )
-        if response.status_code != 200:
-            return None, f"HTTP {response.status_code}"
-        data = response.json()
-        elements = data.get("elements", [])
-        return len(elements), None
-    except requests.exceptions.Timeout:
-        return None, "timed out"
-    except Exception as e:
-        return None, str(e)[:80]
 
+    mirrors = [
+        "https://overpass-api.de/api/interpreter",
+        "https://overpass.kumi.systems/api/interpreter",
+        "https://overpass.openstreetmap.ru/api/interpreter",
+    ]
+
+    last_error = None
+    for mirror_url in mirrors:
+        try:
+            response = requests.post(mirror_url, data={"data": query}, timeout=15)
+            if response.status_code == 200:
+                data = response.json()
+                elements = data.get("elements", [])
+                return len(elements), None
+            last_error = f"HTTP {response.status_code} from {mirror_url}"
+        except requests.exceptions.Timeout:
+            last_error = f"timed out on {mirror_url}"
+        except Exception as e:
+            last_error = f"{str(e)[:60]} on {mirror_url}"
+
+    return None, last_error
 
 def get_nearby_hazards(lat, lon):
     fuel_count, fuel_err = query_overpass_count(lat, lon, 1000, "amenity", "fuel")
