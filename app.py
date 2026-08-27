@@ -2,6 +2,7 @@ import re
 import csv
 import os
 from datetime import datetime
+from io import BytesIO
 
 import ee
 import folium
@@ -13,15 +14,22 @@ from geopy.geocoders import Nominatim
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas
-from io import BytesIO
 
 st.set_page_config(page_title="RiskEye", page_icon="🛰️", layout="wide")
 
 st.markdown("""
     <style>
-    .stMetric { background-color: #F2EFE7; padding: 16px; border-radius: 10px; }
-    div[data-testid="stMetricValue"] { font-size: 20px; white-space: normal; }
-    .block-container { padding-top: 2rem; }
+    .stMetric {
+        background-color: #F7F5EF;
+        padding: 18px 16px;
+        border-radius: 12px;
+        border: 1px solid #E5E0D3;
+    }
+    div[data-testid="stMetricValue"] { font-size: 19px; white-space: normal; }
+    div[data-testid="stMetricLabel"] { font-size: 13px; color: #555555; }
+    .block-container { padding-top: 2rem; max-width: 1100px; }
+    h2, h3 { color: #1F5C3F; }
+    .section-divider { margin: 28px 0 18px 0; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -115,12 +123,8 @@ def score_of(risk_text):
 def get_static_map_image(lat, lon, api_key):
     url = "https://maps.googleapis.com/maps/api/staticmap"
     params = {
-        "center": f"{lat},{lon}",
-        "zoom": 19,
-        "size": "640x400",
-        "maptype": "satellite",
-        "markers": f"color:red|{lat},{lon}",
-        "key": api_key,
+        "center": f"{lat},{lon}", "zoom": 19, "size": "640x400",
+        "maptype": "satellite", "markers": f"color:red|{lat},{lon}", "key": api_key,
     }
     response = requests.get(url, params=params, timeout=10)
     if response.status_code == 200:
@@ -150,7 +154,7 @@ def get_street_view_image(lat, lon, api_key):
 
 def render_interactive_google_map(lat, lon, api_key, height=550):
     html = f"""
-    <div id="map" style="height:{height}px;width:100%;"></div>
+    <div id="map" style="height:{height}px;width:100%;border-radius:10px;overflow:hidden;"></div>
     <script src="https://maps.googleapis.com/maps/api/js?key={api_key}"></script>
     <script>
       function initMap() {{
@@ -167,43 +171,14 @@ def render_interactive_google_map(lat, lon, api_key, height=550):
 
 
 def query_overpass_count(lat, lon, radius_m, key, value):
-    """Returns (count, error_message). count is None if the query failed."""
-    query = f"""
-    [out:json][timeout:20];
-    (
-      node["{key}"="{value}"](around:{radius_m},{lat},{lon});
-      way["{key}"="{value}"](around:{radius_m},{lat},{lon});
-    );
-    out ids;
-    """
+    """Overpass API (free OSM data) is currently unreliable from this hosting environment."""
+    return None, "unavailable"
 
-    mirrors = [
-        "https://overpass-api.de/api/interpreter",
-        "https://overpass.kumi.systems/api/interpreter",
-        "https://overpass.openstreetmap.ru/api/interpreter",
-    ]
-
-    last_error = None
-    for mirror_url in mirrors:
-        try:
-            response = requests.post(mirror_url, data={"data": query}, timeout=15)
-            if response.status_code == 200:
-                data = response.json()
-                elements = data.get("elements", [])
-                return len(elements), None
-            last_error = f"HTTP {response.status_code} from {mirror_url}"
-        except requests.exceptions.Timeout:
-            last_error = f"timed out on {mirror_url}"
-        except Exception as e:
-            last_error = f"{str(e)[:60]} on {mirror_url}"
-
-    return None, last_error
 
 def get_nearby_hazards(lat, lon):
     fuel_count, fuel_err = query_overpass_count(lat, lon, 1000, "amenity", "fuel")
     hosp_count, hosp_err = query_overpass_count(lat, lon, 2000, "amenity", "hospital")
     school_count, school_err = query_overpass_count(lat, lon, 1000, "amenity", "school")
-
     return {
         "filling_stations": fuel_count, "filling_stations_error": fuel_err,
         "hospitals": hosp_count, "hospitals_error": hosp_err,
@@ -270,6 +245,7 @@ def load_history():
     with open(HISTORY_FILE, "r", newline="") as f:
         reader = csv.DictReader(f)
         return list(reader)
+
 def generate_pdf_report(result):
     buffer = BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
@@ -324,17 +300,6 @@ def generate_pdf_report(result):
         line(f"- {action}")
     y -= 4 * mm
 
-    hazards = result.get("hazards")
-    if hazards:
-        section_title("Nearby Infrastructure")
-        fs = hazards.get('filling_stations')
-        hs = hazards.get('hospitals')
-        sc = hazards.get('schools')
-        line(f"Filling stations within 1km: {fs if fs is not None else 'Unavailable'}")
-        line(f"Hospitals within 2km: {hs if hs is not None else 'Unavailable'}")
-        line(f"Schools within 1km: {sc if sc is not None else 'Unavailable'}")
-        y -= 4 * mm
-
     weather = result.get("weather")
     if weather:
         section_title("Weather at Time of Assessment")
@@ -370,7 +335,7 @@ def run_assessment(latitude, longitude, resolved_address):
     collection = (
         ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
         .filterBounds(area)
-        .filterDate('2026-01-01', '2026-08-26')
+        .filterDate('2026-01-01', '2026-08-27')
         .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 15))
         .sort('CLOUDY_PIXEL_PERCENTAGE')
     )
@@ -468,11 +433,13 @@ def run_assessment(latitude, longitude, resolved_address):
     }
 
 
+# ============================== UI ==============================
+
 st.title("🛰️ RiskEye")
 st.caption("AI-assisted property risk screening using satellite imagery")
-st.divider()
 
-st.subheader("Property Location")
+st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
+st.markdown("### 📍 Property Location")
 address = st.text_input("Property address", placeholder="e.g. Wuye, Abuja, Nigeria", label_visibility="collapsed")
 
 with st.expander("Enter coordinates manually instead"):
@@ -482,8 +449,8 @@ with st.expander("Enter coordinates manually instead"):
     with col2:
         manual_lon = st.text_input("Longitude")
 
-st.write("")
-st.subheader("Sum Insured Check (optional)")
+st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
+st.markdown("### 💰 Sum Insured Check (optional)")
 st.caption("Select the building type and enter the declared value to check for possible underinsurance. This is an indicative estimate, not a certified valuation.")
 
 col3, col4, col5 = st.columns(3)
@@ -495,8 +462,8 @@ with col5:
     default_cost = BUILDING_COST_BENCHMARKS[building_type]
     cost_per_sqm = st.number_input("Cost benchmark (₦/sqm)", min_value=0, step=10000, value=default_cost)
 
-run_clicked = st.button("Run Risk Assessment", type="primary", use_container_width=False)
 st.write("")
+run_clicked = st.button("🔍 Run Risk Assessment", type="primary", use_container_width=False)
 
 if run_clicked:
     st.session_state.result = None
@@ -531,15 +498,19 @@ if "result" in st.session_state and st.session_state.result:
     result = st.session_state.result
     risk_color = {"LOW": "green", "MEDIUM": "orange", "HIGH": "red"}[result["overall_label"]]
 
-    st.divider()
-    st.subheader("Assessment Result")
+    st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
+    st.markdown("## 📋 Assessment Result")
 
-    top_col1, top_col2 = st.columns([2, 1])
+    top_col1, top_col2 = st.columns([2.5, 1])
     with top_col1:
         st.write(f"**Location:** {result['resolved_address']}")
-        st.caption(f"Satellite image date: {result['image_date']} • Cloud coverage: {result['cloud_pct']}% • Location source: {result.get('geocode_source', 'n/a')}")
+        st.caption(
+            f"Satellite image date: {result['image_date']} • "
+            f"Cloud coverage: {result['cloud_pct']}% • "
+            f"Location source: {result.get('geocode_source', 'n/a')}"
+        )
     with top_col2:
-        st.markdown(f"#### Overall Risk: :{risk_color}[{result['overall_label']} ({result['overall_percent']}%)]")
+        st.markdown(f"#### Risk: :{risk_color}[{result['overall_label']} ({result['overall_percent']}%)]")
 
     pdf_buffer = generate_pdf_report(result)
     st.download_button(
@@ -555,38 +526,30 @@ if "result" in st.session_state and st.session_state.result:
     c2.metric("Terrain Risk", result["terrain_risk"])
     c3.metric("Surroundings", result["surroundings"])
 
-    st.write("")
     st.info(f"**Recommendation:** {result['recommendation']}")
 
-    st.write("")
-    st.subheader("Recommended Actions")
+    st.markdown("#### ✅ Recommended Actions")
     st.caption("Based on location risk factors only — building-specific issues (roof, wiring, structure) require a physical or drone inspection.")
     for action in result["actions"]:
         st.markdown(f"- {action}")
 
-    st.write("")
-    st.subheader("Nearby Infrastructure & Weather")
-    hazards = result.get("hazards", {})
+    st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
+    st.markdown("### 🌦️ Weather & Surrounding Context")
     weather = result.get("weather")
-
-    h1, h2, h3, h4 = st.columns(4)
-    fs, fs_err = hazards.get("filling_stations"), hazards.get("filling_stations_error")
-    hs, hs_err = hazards.get("hospitals"), hazards.get("hospitals_error")
-    sc, sc_err = hazards.get("schools"), hazards.get("schools_error")
-
-    h1.metric("Filling stations (1km)", fs if fs is not None else "N/A")
-    h2.metric("Hospitals (2km)", hs if hs is not None else "N/A")
-    h3.metric("Schools (1km)", sc if sc is not None else "N/A")
+    w1, w2 = st.columns([1, 3])
     if weather:
-        h4.metric("Weather now", weather.get("condition", "N/A"), f"{weather.get('temperature_c', '?')}°C")
+        w1.metric("Weather now", weather.get("condition", "N/A"), f"{weather.get('temperature_c', '?')}°C")
+    else:
+        w1.metric("Weather now", "Unavailable")
+    w2.info(
+        "Nearby infrastructure counts (filling stations, hospitals, schools) are temporarily "
+        "unavailable — the free OpenStreetMap data service was tested across three servers and "
+        "found unreliable from this deployment. This is a known limitation, not a data-input error."
+    )
+    st.caption("Weather reflects current conditions only, not historical risk patterns.")
 
-    if fs_err or hs_err or sc_err:
-        st.caption(f"⚠️ Some infrastructure lookups failed (data source issue, not your input): {fs_err or ''} {hs_err or ''} {sc_err or ''}".strip())
-
-    st.caption("Infrastructure counts from OpenStreetMap — coverage varies by area and may be incomplete. Weather reflects current conditions only, not historical risk patterns.")
-
-    st.write("")
-    st.subheader("Close-Up View")
+    st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
+    st.markdown("### 🔎 Close-Up View")
     if result.get("overall_score", 1) >= 2:
         if "gcp_static_maps" in st.secrets:
             api_key = st.secrets["gcp_static_maps"]["api_key"]
@@ -624,16 +587,16 @@ if "result" in st.session_state and st.session_state.result:
         st.caption("Close-up image is only shown for properties flagged Medium or High risk (this one is Low).")
 
     if result.get("declared_value", 0) > 0:
-        st.write("")
-        st.subheader("Sum Insured Check")
+        st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
+        st.markdown("### 💰 Sum Insured Check")
 
         estimated_sqm = result["estimated_built_sqm"]
         estimated_cost = estimated_sqm * result["cost_per_sqm"]
 
         sc1, sc2, sc3, sc4 = st.columns(4)
         sc1.metric("Building type", result["building_type"])
-        sc2.metric("Estimated built-up area", f"{estimated_sqm:,.0f} sqm")
-        sc3.metric("Estimated replacement cost", f"₦{estimated_cost:,.0f}")
+        sc2.metric("Est. built-up area", f"{estimated_sqm:,.0f} sqm")
+        sc3.metric("Est. replacement cost", f"₦{estimated_cost:,.0f}")
         sc4.metric("Declared value", f"₦{result['declared_value']:,.0f}")
 
         if estimated_cost > 0:
@@ -658,8 +621,8 @@ if "result" in st.session_state and st.session_state.result:
             "and fittings). Not a certified valuation."
         )
 
-    st.write("")
-    st.subheader("Satellite View (Sentinel-2)")
+    st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
+    st.markdown("### 🛰️ Satellite View (Sentinel-2)")
     st.caption("Zoom using the + / − controls on the map, or scroll while hovering over it. Sentinel-2 imagery has ~10m resolution, so individual buildings will appear blocky rather than sharp.")
 
     m = folium.Map(location=[result["latitude"], result["longitude"]], zoom_start=17, max_zoom=20)
@@ -676,10 +639,9 @@ if "result" in st.session_state and st.session_state.result:
     ).add_to(m)
     st_folium(m, height=550, width=None)
 
-st.write("")
-st.divider()
-st.subheader("Assessment History")
-st.caption("⚠️ Note: history is stored temporarily on the app server and may be cleared when the app restarts. This is a lightweight log for demonstration, not permanent storage.")
+st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
+st.markdown("### 📚 Assessment History")
+st.caption("⚠️ History is stored temporarily on the app server and may be cleared when the app restarts. This is a lightweight log for demonstration, not permanent storage.")
 history = load_history()
 if history:
     st.dataframe(history, use_container_width=True)
