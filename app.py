@@ -532,4 +532,132 @@ if "result" in st.session_state and st.session_state.result:
         "📄 Download PDF Report",
         data=pdf_buffer,
         file_name=f"RiskEye_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-     
+     )
+
+    st.write("")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Flood Exposure", result["flood_risk"])
+    c2.metric("Terrain Risk", result["terrain_risk"])
+    c3.metric("Surroundings", result["surroundings"])
+
+    st.write("")
+    st.info(f"**Recommendation:** {result['recommendation']}")
+
+    st.write("")
+    st.subheader("Recommended Actions")
+    st.caption("Based on location risk factors only — building-specific issues (roof, wiring, structure) require a physical or drone inspection.")
+    for action in result["actions"]:
+        st.markdown(f"- {action}")
+
+    st.write("")
+    st.subheader("Nearby Infrastructure & Weather")
+    hazards = result.get("hazards", {})
+    weather = result.get("weather")
+    h1, h2, h3, h4 = st.columns(4)
+    h1.metric("Filling stations (1km)", hazards.get("filling_stations", "N/A"))
+    h2.metric("Hospitals (2km)", hazards.get("hospitals", "N/A"))
+    h3.metric("Schools (1km)", hazards.get("schools", "N/A"))
+    if weather:
+        h4.metric("Weather now", weather.get("condition", "N/A"), f"{weather.get('temperature_c', '?')}°C")
+    st.caption("Infrastructure counts from OpenStreetMap — coverage varies by area and may be incomplete. Weather reflects current conditions only, not historical risk patterns.")
+
+    st.write("")
+    st.subheader("Close-Up View")
+    if result.get("overall_score", 1) >= 2:
+        if "gcp_static_maps" in st.secrets:
+            api_key = st.secrets["gcp_static_maps"]["api_key"]
+
+            view_mode = st.radio(
+                "View mode",
+                ["Interactive (pan/zoom)", "Static image", "Street View (if available)"],
+                horizontal=True,
+                key="view_mode_radio",
+            )
+
+            if view_mode == "Interactive (pan/zoom)":
+                st.caption("Interactive Google satellite map — you can pan and zoom directly.")
+                render_interactive_google_map(result["latitude"], result["longitude"], api_key)
+            elif view_mode == "Static image":
+                st.caption("Sharper close-up shown because this property is flagged Medium/High risk.")
+                image_bytes = get_static_map_image(result["latitude"], result["longitude"], api_key)
+                if image_bytes:
+                    st.image(image_bytes, caption="Google satellite close-up (single image, not interactive)")
+                else:
+                    st.caption("Close-up image could not be retrieved for this location.")
+            elif view_mode == "Street View (if available)":
+                image_bytes, sv_status = get_street_view_image(result["latitude"], result["longitude"], api_key)
+                if image_bytes:
+                    st.image(image_bytes, caption="Google Street View (ground-level)")
+                else:
+                    st.warning(
+                        f"No Street View imagery available for this location (status: {sv_status}). "
+                        "This is common outside major Nigerian city centers, since Google's Street View "
+                        "cars have limited coverage in Nigeria."
+                    )
+        else:
+            st.caption("Close-up imagery is not configured for this deployment.")
+    else:
+        st.caption("Close-up image is only shown for properties flagged Medium or High risk (this one is Low).")
+
+    if result.get("declared_value", 0) > 0:
+        st.write("")
+        st.subheader("Sum Insured Check")
+
+        estimated_sqm = result["estimated_built_sqm"]
+        estimated_cost = estimated_sqm * result["cost_per_sqm"]
+
+        sc1, sc2, sc3, sc4 = st.columns(4)
+        sc1.metric("Building type", result["building_type"])
+        sc2.metric("Estimated built-up area", f"{estimated_sqm:,.0f} sqm")
+        sc3.metric("Estimated replacement cost", f"₦{estimated_cost:,.0f}")
+        sc4.metric("Declared value", f"₦{result['declared_value']:,.0f}")
+
+        if estimated_cost > 0:
+            gap = estimated_cost - result["declared_value"]
+            gap_pct = max(min((gap / estimated_cost) * 100, 100), -100) if estimated_cost else 0
+
+            if gap_pct > 20:
+                st.warning(
+                    f"**Possible underinsurance:** declared value is approximately "
+                    f"{gap_pct:.0f}% below the estimated replacement cost "
+                    f"(≈₦{gap:,.0f} gap). Recommend a proper valuation."
+                )
+            elif gap_pct < -20:
+                st.info("Declared value appears higher than the estimated replacement cost — worth reviewing for over-insurance.")
+            else:
+                st.success("Declared value appears broadly consistent with the estimated replacement cost.")
+
+        st.caption(
+            "This is a rough, indicative estimate: built-up area is measured from satellite imagery "
+            "(an aerial footprint, not a ground survey or floor count), combined with a general construction "
+            "cost benchmark for the selected building type (structure only — excludes machinery, equipment, "
+            "and fittings). Not a certified valuation."
+        )
+
+    st.write("")
+    st.subheader("Satellite View (Sentinel-2)")
+    st.caption("Zoom using the + / − controls on the map, or scroll while hovering over it. Sentinel-2 imagery has ~10m resolution, so individual buildings will appear blocky rather than sharp.")
+
+    m = folium.Map(location=[result["latitude"], result["longitude"]], zoom_start=17, max_zoom=20)
+    map_id_dict = ee.Image(result["best_image"]).getMapId(
+        {'bands': ['B4', 'B3', 'B2'], 'min': 0, 'max': 3000}
+    )
+    folium.TileLayer(
+        tiles=map_id_dict['tile_fetcher'].url_format,
+        attr='Google Earth Engine', name='Satellite View', overlay=True, max_zoom=20,
+    ).add_to(m)
+    folium.GeoJson(
+        result["area"].getInfo(), name="Property Area",
+        style_function=lambda x: {'color': 'red', 'fillOpacity': 0, 'weight': 3}
+    ).add_to(m)
+    st_folium(m, height=550, width=None)
+
+st.write("")
+st.divider()
+st.subheader("Assessment History")
+st.caption("⚠️ Note: history is stored temporarily on the app server and may be cleared when the app restarts. This is a lightweight log for demonstration, not permanent storage.")
+history = load_history()
+if history:
+    st.dataframe(history, use_container_width=True)
+else:
+    st.caption("No assessments logged yet.")
