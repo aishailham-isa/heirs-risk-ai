@@ -167,34 +167,41 @@ def render_interactive_google_map(lat, lon, api_key, height=550):
 
 
 def query_overpass_count(lat, lon, radius_m, key, value):
+    """Returns (count, error_message). count is None if the query failed."""
     query = f"""
-    [out:json][timeout:15];
+    [out:json][timeout:20];
     (
       node["{key}"="{value}"](around:{radius_m},{lat},{lon});
       way["{key}"="{value}"](around:{radius_m},{lat},{lon});
     );
-    out count;
+    out ids;
     """
     try:
         response = requests.post(
             "https://overpass-api.de/api/interpreter",
             data={"data": query},
-            timeout=15
+            timeout=20
         )
+        if response.status_code != 200:
+            return None, f"HTTP {response.status_code}"
         data = response.json()
         elements = data.get("elements", [])
-        if elements and "tags" in elements[0]:
-            return int(elements[0]["tags"].get("total", 0))
-        return 0
-    except Exception:
-        return None
+        return len(elements), None
+    except requests.exceptions.Timeout:
+        return None, "timed out"
+    except Exception as e:
+        return None, str(e)[:80]
 
 
 def get_nearby_hazards(lat, lon):
+    fuel_count, fuel_err = query_overpass_count(lat, lon, 1000, "amenity", "fuel")
+    hosp_count, hosp_err = query_overpass_count(lat, lon, 2000, "amenity", "hospital")
+    school_count, school_err = query_overpass_count(lat, lon, 1000, "amenity", "school")
+
     return {
-        "filling_stations": query_overpass_count(lat, lon, 1000, "amenity", "fuel"),
-        "hospitals": query_overpass_count(lat, lon, 2000, "amenity", "hospital"),
-        "schools": query_overpass_count(lat, lon, 1000, "amenity", "school"),
+        "filling_stations": fuel_count, "filling_stations_error": fuel_err,
+        "hospitals": hosp_count, "hospitals_error": hosp_err,
+        "schools": school_count, "schools_error": school_err,
     }
 
 
@@ -257,8 +264,6 @@ def load_history():
     with open(HISTORY_FILE, "r", newline="") as f:
         reader = csv.DictReader(f)
         return list(reader)
-
-
 def generate_pdf_report(result):
     buffer = BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
@@ -316,9 +321,12 @@ def generate_pdf_report(result):
     hazards = result.get("hazards")
     if hazards:
         section_title("Nearby Infrastructure")
-        line(f"Filling stations within 1km: {hazards.get('filling_stations', 'N/A')}")
-        line(f"Hospitals within 2km: {hazards.get('hospitals', 'N/A')}")
-        line(f"Schools within 1km: {hazards.get('schools', 'N/A')}")
+        fs = hazards.get('filling_stations')
+        hs = hazards.get('hospitals')
+        sc = hazards.get('schools')
+        line(f"Filling stations within 1km: {fs if fs is not None else 'Unavailable'}")
+        line(f"Hospitals within 2km: {hs if hs is not None else 'Unavailable'}")
+        line(f"Schools within 1km: {sc if sc is not None else 'Unavailable'}")
         y -= 4 * mm
 
     weather = result.get("weather")
@@ -532,7 +540,8 @@ if "result" in st.session_state and st.session_state.result:
         "📄 Download PDF Report",
         data=pdf_buffer,
         file_name=f"RiskEye_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-     )
+        mime="application/pdf",
+    )
 
     st.write("")
     c1, c2, c3 = st.columns(3)
@@ -553,12 +562,21 @@ if "result" in st.session_state and st.session_state.result:
     st.subheader("Nearby Infrastructure & Weather")
     hazards = result.get("hazards", {})
     weather = result.get("weather")
+
     h1, h2, h3, h4 = st.columns(4)
-    h1.metric("Filling stations (1km)", hazards.get("filling_stations", "N/A"))
-    h2.metric("Hospitals (2km)", hazards.get("hospitals", "N/A"))
-    h3.metric("Schools (1km)", hazards.get("schools", "N/A"))
+    fs, fs_err = hazards.get("filling_stations"), hazards.get("filling_stations_error")
+    hs, hs_err = hazards.get("hospitals"), hazards.get("hospitals_error")
+    sc, sc_err = hazards.get("schools"), hazards.get("schools_error")
+
+    h1.metric("Filling stations (1km)", fs if fs is not None else "N/A")
+    h2.metric("Hospitals (2km)", hs if hs is not None else "N/A")
+    h3.metric("Schools (1km)", sc if sc is not None else "N/A")
     if weather:
         h4.metric("Weather now", weather.get("condition", "N/A"), f"{weather.get('temperature_c', '?')}°C")
+
+    if fs_err or hs_err or sc_err:
+        st.caption(f"⚠️ Some infrastructure lookups failed (data source issue, not your input): {fs_err or ''} {hs_err or ''} {sc_err or ''}".strip())
+
     st.caption("Infrastructure counts from OpenStreetMap — coverage varies by area and may be incomplete. Weather reflects current conditions only, not historical risk patterns.")
 
     st.write("")
