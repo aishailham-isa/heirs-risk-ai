@@ -236,7 +236,7 @@ def get_weather(lat, lon):
         return None
 
 
-def get_historical_weather_summary(lat, lon, days_back=90):
+def get_historical_weather_summary(lat, lon, days_back=365):
     """Fetch recent daily rainfall/temperature history and summarize."""
     end_date = datetime.now().date()
     start_date = end_date - timedelta(days=days_back)
@@ -640,7 +640,7 @@ if "result" in st.session_state and st.session_state.result:
     else:
         w2.metric("Rainfall history", "Unavailable")
 
-    st.caption("Historical data reflects the last 90 days — a short-term pattern, not a long-term climate record.")
+    st.caption("Historical data reflects the last 12 Months — a short-term pattern, not a long-term climate record.")
 
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
     st.markdown("### 🔎 Close-Up View")
