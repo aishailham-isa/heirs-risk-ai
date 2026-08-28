@@ -1,7 +1,7 @@
 import re
 import csv
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO
 
 import ee
@@ -170,15 +170,36 @@ def render_interactive_google_map(lat, lon, api_key, height=550):
     components.html(html, height=height)
 
 
-def query_overpass_count(lat, lon, radius_m, key, value):
-    """Overpass API (free OSM data) is currently unreliable from this hosting environment."""
-    return None, "unavailable"
+def get_nearby_places_count(lat, lon, radius_m, place_type, api_key):
+    """Uses Google Places API (Nearby Search) to count places of a given type within a radius."""
+    url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
+    params = {
+        "location": f"{lat},{lon}",
+        "radius": radius_m,
+        "type": place_type,
+        "key": api_key,
+    }
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        data = response.json()
+        status = data.get("status")
+        if status == "OK":
+            count = len(data.get("results", []))
+            if data.get("next_page_token"):
+                count = f"{count}+"
+            return count, None
+        elif status == "ZERO_RESULTS":
+            return 0, None
+        else:
+            return None, status
+    except Exception as e:
+        return None, str(e)[:80]
 
 
-def get_nearby_hazards(lat, lon):
-    fuel_count, fuel_err = query_overpass_count(lat, lon, 1000, "amenity", "fuel")
-    hosp_count, hosp_err = query_overpass_count(lat, lon, 2000, "amenity", "hospital")
-    school_count, school_err = query_overpass_count(lat, lon, 1000, "amenity", "school")
+def get_nearby_hazards(lat, lon, api_key):
+    fuel_count, fuel_err = get_nearby_places_count(lat, lon, 1000, "gas_station", api_key)
+    hosp_count, hosp_err = get_nearby_places_count(lat, lon, 2000, "hospital", api_key)
+    school_count, school_err = get_nearby_places_count(lat, lon, 1000, "school", api_key)
     return {
         "filling_stations": fuel_count, "filling_stations_error": fuel_err,
         "hospitals": hosp_count, "hospitals_error": hosp_err,
@@ -215,6 +236,43 @@ def get_weather(lat, lon):
         return None
 
 
+def get_historical_weather_summary(lat, lon, days_back=90):
+    """Fetch recent daily rainfall/temperature history and summarize."""
+    end_date = datetime.now().date()
+    start_date = end_date - timedelta(days=days_back)
+    try:
+        response = requests.get(
+            "https://archive-api.open-meteo.com/v1/archive",
+            params={
+                "latitude": lat, "longitude": lon,
+                "start_date": start_date.isoformat(), "end_date": end_date.isoformat(),
+                "daily": "precipitation_sum,temperature_2m_max,temperature_2m_min",
+                "timezone": "auto",
+            },
+            timeout=15
+        )
+        data = response.json()
+        daily = data.get("daily", {})
+        precipitation = daily.get("precipitation_sum", [])
+        temp_max = daily.get("temperature_2m_max", [])
+
+        if not precipitation:
+            return None
+
+        rainy_days = sum(1 for p in precipitation if p and p > 1.0)
+        total_rain = sum(p for p in precipitation if p)
+        avg_max_temp = sum(t for t in temp_max if t is not None) / len([t for t in temp_max if t is not None]) if temp_max else None
+
+        return {
+            "period_days": days_back,
+            "rainy_days": rainy_days,
+            "total_rainfall_mm": round(total_rain, 1),
+            "avg_max_temp_c": round(avg_max_temp, 1) if avg_max_temp else None,
+        }
+    except Exception:
+        return None
+
+
 def log_assessment(result):
     try:
         file_exists = os.path.isfile(HISTORY_FILE)
@@ -245,7 +303,6 @@ def load_history():
     with open(HISTORY_FILE, "r", newline="") as f:
         reader = csv.DictReader(f)
         return list(reader)
-
 def generate_pdf_report(result):
     buffer = BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
@@ -300,12 +357,28 @@ def generate_pdf_report(result):
         line(f"- {action}")
     y -= 4 * mm
 
+    hazards = result.get("hazards")
+    if hazards:
+        section_title("Nearby Infrastructure")
+        line(f"Filling stations within 1km: {hazards.get('filling_stations', 'N/A')}")
+        line(f"Hospitals within 2km: {hazards.get('hospitals', 'N/A')}")
+        line(f"Schools within 1km: {hazards.get('schools', 'N/A')}")
+        y -= 4 * mm
+
     weather = result.get("weather")
     if weather:
         section_title("Weather at Time of Assessment")
         line(f"Condition: {weather.get('condition', 'N/A')}")
         line(f"Temperature: {weather.get('temperature_c', 'N/A')} °C")
         line(f"Wind speed: {weather.get('windspeed_kmh', 'N/A')} km/h")
+        y -= 4 * mm
+
+    hist_weather = result.get("historical_weather")
+    if hist_weather:
+        section_title(f"Rainfall History (last {hist_weather.get('period_days')} days)")
+        line(f"Rainy days: {hist_weather.get('rainy_days')}")
+        line(f"Total rainfall: {hist_weather.get('total_rainfall_mm')} mm")
+        line(f"Average max temperature: {hist_weather.get('avg_max_temp_c')} °C")
         y -= 4 * mm
 
     if result.get("declared_value", 0) > 0:
@@ -326,7 +399,7 @@ def generate_pdf_report(result):
     return buffer
 
 
-def run_assessment(latitude, longitude, resolved_address):
+def run_assessment(latitude, longitude, resolved_address, api_key):
     point = ee.Geometry.Point([longitude, latitude])
     area = point.buffer(500)
     search_area = point.buffer(1000)
@@ -419,8 +492,9 @@ def run_assessment(latitude, longitude, resolved_address):
     if not actions:
         actions.append("No significant location-based concerns detected from available data.")
 
-    hazards = get_nearby_hazards(latitude, longitude)
+    hazards = get_nearby_hazards(latitude, longitude, api_key) if api_key else {}
     weather = get_weather(latitude, longitude)
+    historical_weather = get_historical_weather_summary(latitude, longitude)
 
     return {
         "resolved_address": resolved_address, "image_date": image_date, "cloud_pct": cloud_pct,
@@ -429,10 +503,8 @@ def run_assessment(latitude, longitude, resolved_address):
         "recommendation": recommendation, "actions": actions,
         "best_image": best_image, "area": area, "latitude": latitude, "longitude": longitude,
         "estimated_built_sqm": estimated_built_sqm, "overall_score": overall_score,
-        "hazards": hazards, "weather": weather,
+        "hazards": hazards, "weather": weather, "historical_weather": historical_weather,
     }
-
-
 # ============================== UI ==============================
 
 st.title("🛰️ RiskEye")
@@ -450,7 +522,7 @@ with st.expander("Enter coordinates manually instead"):
         manual_lon = st.text_input("Longitude")
 
 st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-st.markdown("### 💰 Sum Insured Check (optional)")
+st.markdown("###  Sum Insured Check (optional)")
 st.caption("Select the building type and enter the declared value to check for possible underinsurance. This is an indicative estimate, not a certified valuation.")
 
 col3, col4, col5 = st.columns(3)
@@ -463,7 +535,7 @@ with col5:
     cost_per_sqm = st.number_input("Cost benchmark (₦/sqm)", min_value=0, step=10000, value=default_cost)
 
 st.write("")
-run_clicked = st.button("🔍 Run Risk Assessment", type="primary", use_container_width=False)
+run_clicked = st.button(" Run Risk Assessment", type="primary", use_container_width=False)
 
 if run_clicked:
     st.session_state.result = None
@@ -481,8 +553,9 @@ if run_clicked:
     if latitude is None:
         st.error("Could not find that address, even with the extended lookup. Try entering coordinates manually above.")
     else:
-        with st.spinner("Analyzing satellite imagery, hazards, and weather..."):
-            result = run_assessment(latitude, longitude, resolved_address)
+        places_api_key = st.secrets["gcp_static_maps"]["api_key"] if "gcp_static_maps" in st.secrets else None
+        with st.spinner("Analyzing satellite imagery, nearby infrastructure, and weather..."):
+            result = run_assessment(latitude, longitude, resolved_address, places_api_key)
 
         if result is None:
             st.error("No clear satellite image found for this location.")
@@ -499,7 +572,7 @@ if "result" in st.session_state and st.session_state.result:
     risk_color = {"LOW": "green", "MEDIUM": "orange", "HIGH": "red"}[result["overall_label"]]
 
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-    st.markdown("## 📋 Assessment Result")
+    st.markdown("##  Assessment Result")
 
     top_col1, top_col2 = st.columns([2.5, 1])
     with top_col1:
@@ -528,25 +601,46 @@ if "result" in st.session_state and st.session_state.result:
 
     st.info(f"**Recommendation:** {result['recommendation']}")
 
-    st.markdown("#### ✅ Recommended Actions")
+    st.markdown("####  Recommended Actions")
     st.caption("Based on location risk factors only — building-specific issues (roof, wiring, structure) require a physical or drone inspection.")
     for action in result["actions"]:
         st.markdown(f"- {action}")
 
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-    st.markdown("### 🌦️ Weather & Surrounding Context")
+    st.markdown("### Nearby Infrastructure")
+    hazards = result.get("hazards", {})
+    h1, h2, h3 = st.columns(3)
+
+    fs, fs_err = hazards.get("filling_stations"), hazards.get("filling_stations_error")
+    hs, hs_err = hazards.get("hospitals"), hazards.get("hospitals_error")
+    sc, sc_err = hazards.get("schools"), hazards.get("schools_error")
+
+    h1.metric("Filling stations (1km)", fs if fs is not None else "N/A")
+    h2.metric("Hospitals (2km)", hs if hs is not None else "N/A")
+    h3.metric("Schools (1km)", sc if sc is not None else "N/A")
+
+    if fs_err or hs_err or sc_err:
+        st.caption(f"⚠️ Some lookups had issues: {fs_err or ''} {hs_err or ''} {sc_err or ''}".strip())
+    st.caption("Counts from Google Places (within radius shown). Coverage is generally strong in major Nigerian cities.")
+
+    st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
+    st.markdown("###  Weather Conditions")
     weather = result.get("weather")
-    w1, w2 = st.columns([1, 3])
+    hist_weather = result.get("historical_weather")
+
+    w1, w2, w3 = st.columns(3)
     if weather:
         w1.metric("Weather now", weather.get("condition", "N/A"), f"{weather.get('temperature_c', '?')}°C")
     else:
         w1.metric("Weather now", "Unavailable")
-    w2.info(
-        "Nearby infrastructure counts (filling stations, hospitals, schools) are temporarily "
-        "unavailable — the free OpenStreetMap data service was tested across three servers and "
-        "found unreliable from this deployment. This is a known limitation, not a data-input error."
-    )
-    st.caption("Weather reflects current conditions only, not historical risk patterns.")
+
+    if hist_weather:
+        w2.metric(f"Rainy days (last {hist_weather['period_days']}d)", hist_weather["rainy_days"])
+        w3.metric("Total rainfall", f"{hist_weather['total_rainfall_mm']} mm")
+    else:
+        w2.metric("Rainfall history", "Unavailable")
+
+    st.caption("Historical data reflects the last 90 days — a short-term pattern, not a long-term climate record.")
 
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
     st.markdown("### 🔎 Close-Up View")
@@ -588,7 +682,7 @@ if "result" in st.session_state and st.session_state.result:
 
     if result.get("declared_value", 0) > 0:
         st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-        st.markdown("### 💰 Sum Insured Check")
+        st.markdown("###  Sum Insured Check")
 
         estimated_sqm = result["estimated_built_sqm"]
         estimated_cost = estimated_sqm * result["cost_per_sqm"]
@@ -640,7 +734,7 @@ if "result" in st.session_state and st.session_state.result:
     st_folium(m, height=550, width=None)
 
 st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-st.markdown("### 📚 Assessment History")
+st.markdown("###  Assessment History")
 st.caption("⚠️ History is stored temporarily on the app server and may be cleared when the app restarts. This is a lightweight log for demonstration, not permanent storage.")
 history = load_history()
 if history:
