@@ -237,7 +237,6 @@ def get_weather(lat, lon):
 
 
 def get_historical_weather_summary(lat, lon, days_back=365):
-    """Fetch recent daily rainfall/temperature history and summarize."""
     end_date = datetime.now().date()
     start_date = end_date - timedelta(days=days_back)
     try:
@@ -261,17 +260,26 @@ def get_historical_weather_summary(lat, lon, days_back=365):
 
         rainy_days = sum(1 for p in precipitation if p and p > 1.0)
         total_rain = sum(p for p in precipitation if p)
+        rainy_pct = round((rainy_days / len(precipitation)) * 100) if precipitation else 0
         avg_max_temp = sum(t for t in temp_max if t is not None) / len([t for t in temp_max if t is not None]) if temp_max else None
+
+        if total_rain < 1000:
+            rainfall_label = "Low annual rainfall"
+        elif total_rain < 1800:
+            rainfall_label = "Moderate to typical annual rainfall for coastal Nigeria"
+        else:
+            rainfall_label = "High annual rainfall"
 
         return {
             "period_days": days_back,
             "rainy_days": rainy_days,
+            "rainy_pct": rainy_pct,
             "total_rainfall_mm": round(total_rain, 1),
+            "rainfall_label": rainfall_label,
             "avg_max_temp_c": round(avg_max_temp, 1) if avg_max_temp else None,
         }
     except Exception:
         return None
-
 
 def log_assessment(result):
     try:
@@ -624,23 +632,31 @@ if "result" in st.session_state and st.session_state.result:
     st.caption("Counts from Google Places (within radius shown). Coverage is generally strong in major Nigerian cities.")
 
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-    st.markdown("###  Weather Conditions")
+    st.markdown("### Weather Conditions")
     weather = result.get("weather")
     hist_weather = result.get("historical_weather")
 
-    w1, w2, w3 = st.columns(3)
+    w1, w2 = st.columns(2)
     if weather:
         w1.metric("Weather now", weather.get("condition", "N/A"), f"{weather.get('temperature_c', '?')}°C")
     else:
         w1.metric("Weather now", "Unavailable")
 
     if hist_weather:
-        w2.metric(f"Rainy days (last {hist_weather['period_days']}d)", hist_weather["rainy_days"])
-        w3.metric("Total rainfall", f"{hist_weather['total_rainfall_mm']} mm")
+        w2.metric(
+            "Rainfall pattern (last 12 months)",
+            hist_weather["rainfall_label"],
+            f"Rained on {hist_weather['rainy_pct']}% of days"
+        )
+        st.caption(
+            f"It rained on {hist_weather['rainy_days']} of the last {hist_weather['period_days']} days, "
+            f"totaling {hist_weather['total_rainfall_mm']} mm — {hist_weather['rainfall_label'].lower()}."
+        )
     else:
-        w2.metric("Rainfall history", "Unavailable")
+        w2.metric("Rainfall pattern", "Unavailable")
 
-    st.caption("Historical data reflects the last 12 Months — a short-term pattern, not a long-term climate record.")
+    st.caption("Historical data reflects the last 12 months — a recent pattern, not a multi-year climate record.")
+
 
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
     st.markdown("### 🔎 Close-Up View")
