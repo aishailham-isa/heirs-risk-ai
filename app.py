@@ -549,7 +549,7 @@ with col5:
     cost_per_sqm = st.number_input("Cost benchmark (₦/sqm)", min_value=0, step=10000, value=default_cost)
 
 st.write("")
-run_clicked = st.button("🔍 Run Risk Assessment", type="primary", use_container_width=False)
+run_clicked = st.button(" Run Risk Assessment", type="primary", use_container_width=False)
 
 if run_clicked:
     st.session_state.result = None
@@ -586,7 +586,7 @@ if "result" in st.session_state and st.session_state.result:
     risk_color = {"LOW": "green", "MEDIUM": "orange", "HIGH": "red"}[result["overall_label"]]
 
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-    st.markdown("## 📋 Assessment Result")
+    st.markdown("##  Assessment Result")
 
     top_col1, top_col2 = st.columns([2.5, 1])
     with top_col1:
@@ -615,13 +615,13 @@ if "result" in st.session_state and st.session_state.result:
 
     st.info(f"**Recommendation:** {result['recommendation']}")
 
-    st.markdown("#### ✅ Recommended Actions")
+    st.markdown("####  Recommended Actions")
     st.caption("Based on location risk factors only — building-specific issues (roof, wiring, structure) require a physical or drone inspection.")
     for action in result["actions"]:
         st.markdown(f"- {action}")
 
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-    st.markdown("### 🏥 Nearby Infrastructure")
+    st.markdown("###  Nearby Infrastructure")
     hazards = result.get("hazards", {})
     h1, h2, h3, h4 = st.columns(4)
 
@@ -705,7 +705,7 @@ if "result" in st.session_state and st.session_state.result:
 
     if result.get("declared_value", 0) > 0:
         st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-        st.markdown("### 💰 Sum Insured Check")
+        st.markdown("### Sum Insured Check")
 
         estimated_sqm = result["estimated_built_sqm"]
         estimated_cost = estimated_sqm * result["cost_per_sqm"]
