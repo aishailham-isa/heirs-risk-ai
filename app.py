@@ -536,7 +536,7 @@ with st.expander("Enter coordinates manually instead"):
         manual_lon = st.text_input("Longitude")
 
 st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-st.markdown("### 💰 Sum Insured Check (optional)")
+st.markdown("###  Sum Insured Check (optional)")
 st.caption("Select the building type and enter the declared value to check for possible underinsurance. This is an indicative estimate, not a certified valuation.")
 
 col3, col4, col5 = st.columns(3)
