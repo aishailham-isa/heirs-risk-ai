@@ -150,8 +150,6 @@ def get_street_view_image(lat, lon, api_key):
     if image_response.status_code == 200:
         return image_response.content, "OK"
     return None, "FETCH_FAILED"
-
-
 def render_interactive_google_map(lat, lon, api_key, height=550):
     html = f"""
     <div id="map" style="height:{height}px;width:100%;border-radius:10px;overflow:hidden;"></div>
@@ -171,7 +169,6 @@ def render_interactive_google_map(lat, lon, api_key, height=550):
 
 
 def get_nearby_places_count(lat, lon, radius_m, place_type, api_key):
-    """Uses Google Places API (Nearby Search) to count places of a given type within a radius."""
     url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
     params = {
         "location": f"{lat},{lon}",
@@ -200,10 +197,12 @@ def get_nearby_hazards(lat, lon, api_key):
     fuel_count, fuel_err = get_nearby_places_count(lat, lon, 1000, "gas_station", api_key)
     hosp_count, hosp_err = get_nearby_places_count(lat, lon, 2000, "hospital", api_key)
     school_count, school_err = get_nearby_places_count(lat, lon, 1000, "school", api_key)
+    fire_count, fire_err = get_nearby_places_count(lat, lon, 200, "fire_station", api_key)
     return {
         "filling_stations": fuel_count, "filling_stations_error": fuel_err,
         "hospitals": hosp_count, "hospitals_error": hosp_err,
         "schools": school_count, "schools_error": school_err,
+        "fire_stations": fire_count, "fire_stations_error": fire_err,
     }
 
 
@@ -261,7 +260,8 @@ def get_historical_weather_summary(lat, lon, days_back=365):
         rainy_days = sum(1 for p in precipitation if p and p > 1.0)
         total_rain = sum(p for p in precipitation if p)
         rainy_pct = round((rainy_days / len(precipitation)) * 100) if precipitation else 0
-        avg_max_temp = sum(t for t in temp_max if t is not None) / len([t for t in temp_max if t is not None]) if temp_max else None
+        valid_temps = [t for t in temp_max if t is not None]
+        avg_max_temp = sum(valid_temps) / len(valid_temps) if valid_temps else None
 
         if total_rain < 1000:
             rainfall_label = "Low annual rainfall"
@@ -280,6 +280,7 @@ def get_historical_weather_summary(lat, lon, days_back=365):
         }
     except Exception:
         return None
+
 
 def log_assessment(result):
     try:
@@ -311,6 +312,8 @@ def load_history():
     with open(HISTORY_FILE, "r", newline="") as f:
         reader = csv.DictReader(f)
         return list(reader)
+
+
 def generate_pdf_report(result):
     buffer = BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
@@ -371,6 +374,7 @@ def generate_pdf_report(result):
         line(f"Filling stations within 1km: {hazards.get('filling_stations', 'N/A')}")
         line(f"Hospitals within 2km: {hazards.get('hospitals', 'N/A')}")
         line(f"Schools within 1km: {hazards.get('schools', 'N/A')}")
+        line(f"Fire stations within 200m: {hazards.get('fire_stations', 'N/A')}")
         y -= 4 * mm
 
     weather = result.get("weather")
@@ -383,10 +387,10 @@ def generate_pdf_report(result):
 
     hist_weather = result.get("historical_weather")
     if hist_weather:
-        section_title(f"Rainfall History (last {hist_weather.get('period_days')} days)")
-        line(f"Rainy days: {hist_weather.get('rainy_days')}")
+        section_title(f"Rainfall Pattern (last {hist_weather.get('period_days')} days)")
+        line(f"{hist_weather.get('rainfall_label')}")
+        line(f"Rained on {hist_weather.get('rainy_days')} days ({hist_weather.get('rainy_pct')}% of period)")
         line(f"Total rainfall: {hist_weather.get('total_rainfall_mm')} mm")
-        line(f"Average max temperature: {hist_weather.get('avg_max_temp_c')} °C")
         y -= 4 * mm
 
     if result.get("declared_value", 0) > 0:
@@ -416,7 +420,7 @@ def run_assessment(latitude, longitude, resolved_address, api_key):
     collection = (
         ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
         .filterBounds(area)
-        .filterDate('2026-01-01', '2026-08-27')
+        .filterDate('2026-01-01', '2026-08-28')
         .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 15))
         .sort('CLOUDY_PIXEL_PERCENTAGE')
     )
@@ -513,6 +517,8 @@ def run_assessment(latitude, longitude, resolved_address, api_key):
         "estimated_built_sqm": estimated_built_sqm, "overall_score": overall_score,
         "hazards": hazards, "weather": weather, "historical_weather": historical_weather,
     }
+
+
 # ============================== UI ==============================
 
 st.title("🛰️ RiskEye")
@@ -530,7 +536,7 @@ with st.expander("Enter coordinates manually instead"):
         manual_lon = st.text_input("Longitude")
 
 st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-st.markdown("###  Sum Insured Check (optional)")
+st.markdown("### 💰 Sum Insured Check (optional)")
 st.caption("Select the building type and enter the declared value to check for possible underinsurance. This is an indicative estimate, not a certified valuation.")
 
 col3, col4, col5 = st.columns(3)
@@ -543,7 +549,7 @@ with col5:
     cost_per_sqm = st.number_input("Cost benchmark (₦/sqm)", min_value=0, step=10000, value=default_cost)
 
 st.write("")
-run_clicked = st.button(" Run Risk Assessment", type="primary", use_container_width=False)
+run_clicked = st.button("🔍 Run Risk Assessment", type="primary", use_container_width=False)
 
 if run_clicked:
     st.session_state.result = None
@@ -580,7 +586,7 @@ if "result" in st.session_state and st.session_state.result:
     risk_color = {"LOW": "green", "MEDIUM": "orange", "HIGH": "red"}[result["overall_label"]]
 
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-    st.markdown("##  Assessment Result")
+    st.markdown("## 📋 Assessment Result")
 
     top_col1, top_col2 = st.columns([2.5, 1])
     with top_col1:
@@ -609,30 +615,32 @@ if "result" in st.session_state and st.session_state.result:
 
     st.info(f"**Recommendation:** {result['recommendation']}")
 
-    st.markdown("####  Recommended Actions")
+    st.markdown("#### ✅ Recommended Actions")
     st.caption("Based on location risk factors only — building-specific issues (roof, wiring, structure) require a physical or drone inspection.")
     for action in result["actions"]:
         st.markdown(f"- {action}")
 
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-    st.markdown("### Nearby Infrastructure")
+    st.markdown("### 🏥 Nearby Infrastructure")
     hazards = result.get("hazards", {})
-    h1, h2, h3 = st.columns(3)
+    h1, h2, h3, h4 = st.columns(4)
 
     fs, fs_err = hazards.get("filling_stations"), hazards.get("filling_stations_error")
     hs, hs_err = hazards.get("hospitals"), hazards.get("hospitals_error")
     sc, sc_err = hazards.get("schools"), hazards.get("schools_error")
+    fr, fr_err = hazards.get("fire_stations"), hazards.get("fire_stations_error")
 
     h1.metric("Filling stations (1km)", fs if fs is not None else "N/A")
     h2.metric("Hospitals (2km)", hs if hs is not None else "N/A")
     h3.metric("Schools (1km)", sc if sc is not None else "N/A")
+    h4.metric("Fire stations (200m)", fr if fr is not None else "N/A")
 
-    if fs_err or hs_err or sc_err:
-        st.caption(f"⚠️ Some lookups had issues: {fs_err or ''} {hs_err or ''} {sc_err or ''}".strip())
+    if fs_err or hs_err or sc_err or fr_err:
+        st.caption(f"⚠️ Some lookups had issues: {fs_err or ''} {hs_err or ''} {sc_err or ''} {fr_err or ''}".strip())
     st.caption("Counts from Google Places (within radius shown). Coverage is generally strong in major Nigerian cities.")
 
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-    st.markdown("### Weather Conditions")
+    st.markdown("### 🌦️ Weather Conditions")
     weather = result.get("weather")
     hist_weather = result.get("historical_weather")
 
@@ -656,7 +664,6 @@ if "result" in st.session_state and st.session_state.result:
         w2.metric("Rainfall pattern", "Unavailable")
 
     st.caption("Historical data reflects the last 12 months — a recent pattern, not a multi-year climate record.")
-
 
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
     st.markdown("### 🔎 Close-Up View")
@@ -698,7 +705,7 @@ if "result" in st.session_state and st.session_state.result:
 
     if result.get("declared_value", 0) > 0:
         st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-        st.markdown("###  Sum Insured Check")
+        st.markdown("### 💰 Sum Insured Check")
 
         estimated_sqm = result["estimated_built_sqm"]
         estimated_cost = estimated_sqm * result["cost_per_sqm"]
@@ -750,7 +757,7 @@ if "result" in st.session_state and st.session_state.result:
     st_folium(m, height=550, width=None)
 
 st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-st.markdown("###  Assessment History")
+st.markdown("### 📚 Assessment History")
 st.caption("⚠️ History is stored temporarily on the app server and may be cleared when the app restarts. This is a lightweight log for demonstration, not permanent storage.")
 history = load_history()
 if history:
