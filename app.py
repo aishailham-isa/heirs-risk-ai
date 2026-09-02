@@ -214,12 +214,21 @@ def get_area_character(commercial_count):
     """Rough inference of area character based on nearby commercial activity — NOT building detection."""
     if commercial_count is None:
         return "Unknown (data unavailable)"
+
+    if isinstance(commercial_count, str):
+        numeric_part = commercial_count.replace("+", "")
+        try:
+            commercial_count = int(numeric_part)
+        except ValueError:
+            return "Unknown (data unavailable)"
+
     if commercial_count == 0:
         return "Likely residential (few nearby businesses detected)"
     elif commercial_count <= 3:
         return "Mixed residential/commercial (some nearby businesses)"
     else:
         return "Likely commercial area (many nearby businesses)"
+
 
 
 WEATHER_CODES = {
