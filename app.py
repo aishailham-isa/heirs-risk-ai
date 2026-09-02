@@ -307,7 +307,7 @@ def get_historical_weather_summary(lat, lon, days_back=365):
         return None
 
 
-def search_planet_imagery(lat, lon, api_key, days_back=14):
+def search_planet_imagery(lat, lon, api_key, days_back=60):
     end_date = datetime.now()
     start_date = end_date - timedelta(days=days_back)
 
@@ -327,7 +327,7 @@ def search_planet_imagery(lat, lon, api_key, days_back=14):
                         "lte": end_date.strftime("%Y-%m-%dT23:59:59.000Z")
                     }
                 },
-                {"type": "RangeFilter", "field_name": "cloud_cover", "config": {"lte": 0.2}}
+                {"type": "RangeFilter", "field_name": "cloud_cover", "config": {"lte": 0.5}}
             ]
         }
     }
