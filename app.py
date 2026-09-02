@@ -199,7 +199,7 @@ def get_nearby_hazards(lat, lon, api_key):
     fuel_count, fuel_err = get_nearby_places_count(lat, lon, 1000, "gas_station", api_key)
     hosp_count, hosp_err = get_nearby_places_count(lat, lon, 2000, "hospital", api_key)
     school_count, school_err = get_nearby_places_count(lat, lon, 1000, "school", api_key)
-    fire_count, fire_err = get_nearby_places_count(lat, lon, 1500, "fire_station", api_key)
+    fire_count, fire_err = get_nearby_places_count(lat, lon, 200, "fire_station", api_key)
     commercial_count, commercial_err = get_nearby_places_count(lat, lon, 500, "store", api_key)
     return {
         "filling_stations": fuel_count, "filling_stations_error": fuel_err,
