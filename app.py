@@ -150,6 +150,79 @@ def get_street_view_image(lat, lon, api_key):
     if image_response.status_code == 200:
         return image_response.content, "OK"
     return None, "FETCH_FAILED"
+
+def search_planet_imagery(lat, lon, api_key, days_back=14):
+    """Search Planet's PlanetScope archive for the most recent clear image at this location."""
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=days_back)
+
+    geometry = {
+        "type": "Point",
+        "coordinates": [lon, lat]
+    }
+
+    search_request = {
+        "item_types": ["PSScene"],
+        "filter": {
+            "type": "AndFilter",
+            "config": [
+                {
+                    "type": "GeometryFilter",
+                    "field_name": "geometry",
+                    "config": geometry
+                },
+                {
+                    "type": "DateRangeFilter",
+                    "field_name": "acquired",
+                    "config": {
+                        "gte": start_date.strftime("%Y-%m-%dT00:00:00.000Z"),
+                        "lte": end_date.strftime("%Y-%m-%dT23:59:59.000Z")
+                    }
+                },
+                {
+                    "type": "RangeFilter",
+                    "field_name": "cloud_cover",
+                    "config": {"lte": 0.2}
+                }
+            ]
+        }
+    }
+
+    try:
+        response = requests.post(
+            "https://api.planet.com/data/v1/quick-search",
+            auth=(api_key, ""),
+            json=search_request,
+            timeout=20
+        )
+        if response.status_code != 200:
+            return None, f"HTTP {response.status_code}: {response.text[:150]}"
+
+        data = response.json()
+        features = data.get("features", [])
+        if not features:
+            return None, "No clear Planet imagery found in this date range for this location."
+
+        best = min(features, key=lambda f: f["properties"].get("cloud_cover", 1))
+        return {
+            "id": best["id"],
+            "acquired": best["properties"].get("acquired"),
+            "cloud_cover": best["properties"].get("cloud_cover"),
+            "thumbnail_url": best.get("_links", {}).get("thumbnail"),
+        }, None
+    except Exception as e:
+        return None, str(e)[:150]
+
+
+def get_planet_thumbnail(thumbnail_url, api_key):
+    try:
+        response = requests.get(thumbnail_url, auth=(api_key, ""), timeout=20)
+        if response.status_code == 200:
+            return response.content
+    except Exception:
+        pass
+    return None
+
 def render_interactive_google_map(lat, lon, api_key, height=550):
     html = f"""
     <div id="map" style="height:{height}px;width:100%;border-radius:10px;overflow:hidden;"></div>
@@ -586,7 +659,7 @@ if "result" in st.session_state and st.session_state.result:
     risk_color = {"LOW": "green", "MEDIUM": "orange", "HIGH": "red"}[result["overall_label"]]
 
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-    st.markdown("##  Assessment Result")
+    st.markdown("## 📋 Assessment Result")
 
     top_col1, top_col2 = st.columns([2.5, 1])
     with top_col1:
@@ -615,7 +688,7 @@ if "result" in st.session_state and st.session_state.result:
 
     st.info(f"**Recommendation:** {result['recommendation']}")
 
-    st.markdown("####  Recommended Actions")
+    st.markdown("#### Recommended Actions")
     st.caption("Based on location risk factors only — building-specific issues (roof, wiring, structure) require a physical or drone inspection.")
     for action in result["actions"]:
         st.markdown(f"- {action}")
@@ -703,58 +776,80 @@ if "result" in st.session_state and st.session_state.result:
     else:
         st.caption("Close-up image is only shown for properties flagged Medium or High risk (this one is Low).")
 
-    if result.get("declared_value", 0) > 0:
-        st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-        st.markdown("### Sum Insured Check")
+if "planet_labs" in st.secrets:
+    st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
+    st.markdown("### 🪐 Planet Labs Imagery (Trial)")
+    st.caption("Daily-refresh satellite imagery from Planet Labs — sharper and fresher than Sentinel-2. Available during trial access only.")
 
-        estimated_sqm = result["estimated_built_sqm"]
-        estimated_cost = estimated_sqm * result["cost_per_sqm"]
-
-        sc1, sc2, sc3, sc4 = st.columns(4)
-        sc1.metric("Building type", result["building_type"])
-        sc2.metric("Est. built-up area", f"{estimated_sqm:,.0f} sqm")
-        sc3.metric("Est. replacement cost", f"₦{estimated_cost:,.0f}")
-        sc4.metric("Declared value", f"₦{result['declared_value']:,.0f}")
-
-        if estimated_cost > 0:
-            gap = estimated_cost - result["declared_value"]
-            gap_pct = max(min((gap / estimated_cost) * 100, 100), -100) if estimated_cost else 0
-
-            if gap_pct > 20:
-                st.warning(
-                    f"**Possible underinsurance:** declared value is approximately "
-                    f"{gap_pct:.0f}% below the estimated replacement cost "
-                    f"(≈₦{gap:,.0f} gap). Recommend a proper valuation."
-                )
-            elif gap_pct < -20:
-                st.info("Declared value appears higher than the estimated replacement cost — worth reviewing for over-insurance.")
-            else:
-                st.success("Declared value appears broadly consistent with the estimated replacement cost.")
-
-        st.caption(
-            "This is a rough, indicative estimate: built-up area is measured from satellite imagery "
-            "(an aerial footprint, not a ground survey or floor count), combined with a general construction "
-            "cost benchmark for the selected building type (structure only — excludes machinery, equipment, "
-            "and fittings). Not a certified valuation."
+    planet_key = st.secrets["planet_labs"]["api_key"]
+    with st.spinner("Searching Planet Labs archive..."):
+        planet_result, planet_err = search_planet_imagery(
+            result["latitude"], result["longitude"], planet_key
         )
 
-    st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-    st.markdown("### 🛰️ Satellite View (Sentinel-2)")
-    st.caption("Zoom using the + / − controls on the map, or scroll while hovering over it. Sentinel-2 imagery has ~10m resolution, so individual buildings will appear blocky rather than sharp.")
+    if planet_result:
+        st.write(f"**Image acquired:** {planet_result['acquired']} • **Cloud cover:** {planet_result['cloud_cover']*100:.1f}%")
+        if planet_result.get("thumbnail_url"):
+            thumb_bytes = get_planet_thumbnail(planet_result["thumbnail_url"], planet_key)
+            if thumb_bytes:
+                st.image(thumb_bytes, caption="Planet Labs PlanetScope thumbnail")
+            else:
+                st.caption("Thumbnail could not be retrieved (may require full authentication flow).")
+    else:
+        st.warning(f"Planet Labs imagery unavailable: {planet_err}")
 
-    m = folium.Map(location=[result["latitude"], result["longitude"]], zoom_start=17, max_zoom=20)
-    map_id_dict = ee.Image(result["best_image"]).getMapId(
-        {'bands': ['B4', 'B3', 'B2'], 'min': 0, 'max': 3000}
+if result.get("declared_value", 0) > 0:
+    st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
+    st.markdown("### Sum Insured Check")
+
+    estimated_sqm = result["estimated_built_sqm"]
+    estimated_cost = estimated_sqm * result["cost_per_sqm"]
+
+    sc1, sc2, sc3, sc4 = st.columns(4)
+    sc1.metric("Building type", result["building_type"])
+    sc2.metric("Est. built-up area", f"{estimated_sqm:,.0f} sqm")
+    sc3.metric("Est. replacement cost", f"₦{estimated_cost:,.0f}")
+    sc4.metric("Declared value", f"₦{result['declared_value']:,.0f}")
+
+    if estimated_cost > 0:
+        gap = estimated_cost - result["declared_value"]
+        gap_pct = max(min((gap / estimated_cost) * 100, 100), -100) if estimated_cost else 0
+
+        if gap_pct > 20:
+            st.warning(
+                f"**Possible underinsurance:** declared value is approximately "
+                f"{gap_pct:.0f}% below the estimated replacement cost "
+                f"(≈₦{gap:,.0f} gap). Recommend a proper valuation."
+            )
+        elif gap_pct < -20:
+            st.info("Declared value appears higher than the estimated replacement cost — worth reviewing for over-insurance.")
+        else:
+            st.success("Declared value appears broadly consistent with the estimated replacement cost.")
+
+    st.caption(
+        "This is a rough, indicative estimate: built-up area is measured from satellite imagery "
+        "(an aerial footprint, not a ground survey or floor count), combined with a general construction "
+        "cost benchmark for the selected building type (structure only — excludes machinery, equipment, "
+        "and fittings). Not a certified valuation."
     )
-    folium.TileLayer(
-        tiles=map_id_dict['tile_fetcher'].url_format,
-        attr='Google Earth Engine', name='Satellite View', overlay=True, max_zoom=20,
-    ).add_to(m)
-    folium.GeoJson(
-        result["area"].getInfo(), name="Property Area",
-        style_function=lambda x: {'color': 'red', 'fillOpacity': 0, 'weight': 3}
-    ).add_to(m)
-    st_folium(m, height=550, width=None)
+
+st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
+st.markdown("### 🛰️ Satellite View (Sentinel-2)")
+st.caption("Zoom using the + / − controls on the map, or scroll while hovering over it. Sentinel-2 imagery has ~10m resolution, so individual buildings will appear blocky rather than sharp.")
+
+m = folium.Map(location=[result["latitude"], result["longitude"]], zoom_start=17, max_zoom=20)
+map_id_dict = ee.Image(result["best_image"]).getMapId(
+    {'bands': ['B4', 'B3', 'B2'], 'min': 0, 'max': 3000}
+)
+folium.TileLayer(
+    tiles=map_id_dict['tile_fetcher'].url_format,
+    attr='Google Earth Engine', name='Satellite View', overlay=True, max_zoom=20,
+).add_to(m)
+folium.GeoJson(
+    result["area"].getInfo(), name="Property Area",
+    style_function=lambda x: {'color': 'red', 'fillOpacity': 0, 'weight': 3}
+).add_to(m)
+st_folium(m, height=550, width=None)
 
 st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
 st.markdown("### 📚 Assessment History")
