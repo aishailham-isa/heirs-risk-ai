@@ -702,7 +702,7 @@ if "result" in st.session_state and st.session_state.result:
 
     st.info(f"**Recommendation:** {result['recommendation']}")
 
-    st.markdown("####Recommended Actions")
+    st.markdown("#### Recommended Actions")
     st.caption("Based on location risk factors only — building-specific issues (roof, wiring, structure) require a physical or drone inspection.")
     for action in result["actions"]:
         st.markdown(f"- {action}")
