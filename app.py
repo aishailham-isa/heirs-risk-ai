@@ -305,49 +305,94 @@ def get_historical_weather_summary(lat, lon, days_back=365):
         return None
 
 def fetch_area_news(resolved_address: str, num_results: int = 5):
-    """Searches news desks and public platforms for incidents within the last 12 months."""
+    """Searches news desks and public sources for incidents strictly tied to the locality within the past year."""
     if "tavily" not in st.secrets:
         return None, "Tavily API key not configured in secrets."
 
     if not resolved_address:
         return [], None
 
+    # Strip pure postal numbers, numbers-only tokens, and Nigeria
     raw_tokens = [p.strip() for p in resolved_address.split(",") if p.strip()]
     tokens = [
         t for t in raw_tokens 
         if not re.search(r"^\d+$", t) and not re.search(r"\b(Nigeria|\d{5,6})\b", t, re.I)
     ]
 
-    if len(tokens) >= 2:
-        locality = re.sub(r"^\d+[A-Za-z\-/\s]*", "", tokens[1]).strip()
-        state = tokens[-1].strip()
-        target_location = f"{locality} {state}"
-    elif tokens:
-        target_location = re.sub(r"^\d+[A-Za-z\-/\s]*", "", tokens[0]).strip()
+    # Target the specific neighborhood/axis (e.g. "Ajah" or "Lekki" or "Victoria Island")
+    if tokens:
+        # Strip leading numbers/letters from street names if present
+        target_locality = re.sub(r"^\d+[A-Za-z\-/\s]*", "", tokens[0]).strip()
+        # Clean street suffix words
+        target_locality = re.sub(r"(Street|St|Road|Rd|Close|Cl|Crescent|Way|Avenue|Ave)\b", "", target_locality, flags=re.I).strip()
     else:
-        target_location = "Lagos Nigeria"
+        target_locality = "Lagos"
 
-    target_location = re.sub(r"(Street|St|Road|Rd|Close|Cl|Crescent|Way|Avenue|Ave)\b", "", target_location, flags=re.I).strip()
+    if not target_locality and len(tokens) > 1:
+        target_locality = tokens[1].strip()
+
+    # Enclose the specific corridor in exact quotes so it cannot drift across the state
+    search_query = f'"{target_locality}" (flood OR fire OR "building collapse" OR robbery OR "gas explosion" OR unrest)'
 
     url = "https://api.tavily.com/search"
     payload = {
         "api_key": st.secrets["tavily"]["api_key"],
-        "query": f"{target_location} (flood OR fire OR building collapse OR robbery OR gas explosion OR unrest)",
+        "query": search_query,
         "search_depth": "advanced",
-        "time_range": "year", # Caps results to the last 12 months max
-        "max_results": 10,
+        "time_range": "year",
+        "max_results": 15,
         "include_domains": [
             "punchng.com",
             "vanguardngr.com",
             "dailytrust.com",
             "thecable.ng",
             "channelstv.com",
-            "nairaland.com", # Nigeria's largest public discussion forum
-            "x.com", # Social posts / live incident updates
-            "twitter.com"
-            "lindaikejiblog.com", # Popular Nigerian blog with news and gossip
+            "nairaland.com",
+            "x.com"
+            "lindaikejisblog.com",
         ],
     }
+
+    try:
+        response = requests.post(url, json=payload, timeout=12)
+        data = response.json()
+
+        if "error" in data:
+            return None, data["error"]
+
+        news_hits = []
+        loc_key = target_locality.lower()
+
+        for item in data.get("results", []):
+            title = item.get("title", "")
+            content = item.get("content", "")
+            combined = f"{title} {content}".lower()
+
+            # Skip generic morning summaries/roundups
+            if any(term in title.lower() for term in ["morning headlines", "morning recap", "top stories"]):
+                continue
+
+            # Strict verification: the article must actually mention the neighborhood
+            if loc_key not in combined:
+                continue
+
+            raw_date = item.get("published_date")
+            date_str = raw_date[:10] if raw_date else "Past 12 months"
+
+            news_hits.append({
+                "title": title,
+                "snippet": content,
+                "link": item.get("url", ""),
+                "date": date_str
+            })
+
+            if len(news_hits) >= num_results:
+                break
+
+        return news_hits, None
+    except Exception as e:
+        return None, str(e)[:100]
+
 
     try:
         response = requests.post(url, json=payload, timeout=12)
