@@ -305,22 +305,19 @@ def get_historical_weather_summary(lat, lon, days_back=365):
         return None
 
 def fetch_area_news(resolved_address: str, num_results: int = 5):
-    """Searches trusted Nigerian news outlets for area-specific incidents across Nigeria."""
+    """Searches news desks and public platforms for incidents within the last 12 months."""
     if "tavily" not in st.secrets:
         return None, "Tavily API key not configured in secrets."
 
     if not resolved_address:
         return [], None
 
-    # 1. Clean out digits, postal codes, and pure country labels
     raw_tokens = [p.strip() for p in resolved_address.split(",") if p.strip()]
     tokens = [
         t for t in raw_tokens 
         if not re.search(r"^\d+$", t) and not re.search(r"\b(Nigeria|\d{5,6})\b", t, re.I)
     ]
 
-    # 2. Extract District / Town and State
-    # e.g. "107B Ajose Adeogun St, Victoria Island, Lagos" -> focus on "Victoria Island Lagos"
     if len(tokens) >= 2:
         locality = re.sub(r"^\d+[A-Za-z\-/\s]*", "", tokens[1]).strip()
         state = tokens[-1].strip()
@@ -330,22 +327,25 @@ def fetch_area_news(resolved_address: str, num_results: int = 5):
     else:
         target_location = "Lagos Nigeria"
 
-    # Remove lingering noise words
     target_location = re.sub(r"(Street|St|Road|Rd|Close|Cl|Crescent|Way|Avenue|Ave)\b", "", target_location, flags=re.I).strip()
 
     url = "https://api.tavily.com/search"
     payload = {
         "api_key": st.secrets["tavily"]["api_key"],
-        "query": f"{target_location} (flood OR fire OR building collapse OR robbery OR gas explosion incident news)",
+        "query": f"{target_location} (flood OR fire OR building collapse OR robbery OR gas explosion OR unrest)",
         "search_depth": "advanced",
+        "time_range": "year", # Caps results to the last 12 months max
         "max_results": 10,
         "include_domains": [
             "punchng.com",
             "vanguardngr.com",
             "dailytrust.com",
             "thecable.ng",
-            "premiumtimesng.com",
             "channelstv.com",
+            "nairaland.com", # Nigeria's largest public discussion forum
+            "x.com", # Social posts / live incident updates
+            "twitter.com"
+            "lindaikejiblog.com", # Popular Nigerian blog with news and gossip
         ],
     }
 
@@ -356,18 +356,21 @@ def fetch_area_news(resolved_address: str, num_results: int = 5):
         if "error" in data:
             return None, data["error"]
 
-        items = data.get("results", [])
         news_hits = []
-        for item in items:
+        for item in data.get("results", []):
             title = item.get("title", "")
-            # Skip multi-story daily digests/roundups
-            if any(term in title.lower() for term in ["morning headlines", "morning recap", "top stories", "today in news"]):
+            if any(term in title.lower() for term in ["morning headlines", "morning recap", "top stories"]):
                 continue
+
+            # Format raw published date if available
+            raw_date = item.get("published_date")
+            date_str = raw_date[:10] if raw_date else "Past 12 months"
 
             news_hits.append({
                 "title": title,
                 "snippet": item.get("content", ""),
                 "link": item.get("url", ""),
+                "date": date_str
             })
 
             if len(news_hits) >= num_results:
@@ -376,7 +379,6 @@ def fetch_area_news(resolved_address: str, num_results: int = 5):
         return news_hits, None
     except Exception as e:
         return None, str(e)[:100]
-
 
 
     try:
@@ -876,14 +878,18 @@ if "result" in st.session_state and st.session_state.result:
         if err:
             st.warning(f"Search provider issue: {err}")
         elif incidents:
-            st.caption(f"Curated incident alerts for **{resolved_addr}**:")
+            st.caption(f"Curated incident alerts for **{resolved_addr}** (Last 12 Months):")
             for item in incidents:
-                st.markdown(f"**[{item['title']}]({item['link']})**")
-                st.caption(item["snippet"])
-                st.divider()
-        else:
-            st.info(f"No major flood, fire, or collapse alerts currently reported for this area.")
+                raw_snippet = item.get("snippet", "")
+                clean_snippet = raw_snippet.split("\n")[0].strip()
+                if len(clean_snippet) > 220:
+                    clean_snippet = clean_snippet[:220].rsplit(" ", 1)[0] + "..."
 
+                with st.container():
+                    st.markdown(f"**🔗 [{item['title']}]({item['link']})**")
+                    st.caption(f"🗓️ Published: `{item.get('date', 'Past 12 months')}`")
+                    st.write(f"<span style='color: #444; font-size: 0.9rem;'>{clean_snippet}</span>", unsafe_allow_html=True)
+                    st.divider()
 
 
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
