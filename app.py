@@ -312,33 +312,34 @@ def fetch_area_news(resolved_address: str, num_results: int = 5):
     if not resolved_address:
         return [], None
 
-    # Clean address tokens for any Nigerian location
+    # Extract clean neighborhood / town name
     parts = [p.strip() for p in resolved_address.split(",") if p.strip()]
-    # Remove country and postal codes
     parts = [p for p in parts if not re.search(r"\b(Nigeria|\d{5,6})\b", p, re.IGNORECASE)]
 
-    if not parts:
-        query_location = "Nigeria"
-    elif len(parts) == 1:
-        # e.g., "Maitama" or "107B Ajose Adeogun St" -> strip leading street numbers
-        query_location = re.sub(r"^\d+[A-Za-z\-/\s]*", "", parts[0]).strip()
+    if len(parts) >= 2:
+        # Prioritize neighborhood (e.g. Victoria Island, Wuye, Ikeja)
+        neighborhood = parts[1] if re.search(r"^\d+", parts[0]) else parts[0]
+        region = parts[-1]
+    elif parts:
+        neighborhood = re.sub(r"^\d+[A-Za-z\-/\s]*", "", parts[0]).strip()
+        region = "Nigeria"
     else:
-        # e.g., "Victoria Island, Lagos" or "Wuse 2, Abuja"
-        local_area = re.sub(r"^\d+[A-Za-z\-/\s]*", "", parts[0]).strip()
-        region = parts[-1].strip()
-        query_location = f"{local_area} {region}".strip()
+        neighborhood = "Nigeria"
+        region = ""
 
-    # Fallback to pure state/city if local string is empty
-    if not query_location:
-        query_location = parts[-1] if parts else "Nigeria"
+    # Clean punctuation
+    neighborhood = re.sub(r"^\d+[A-Za-z]?\s*", "", neighborhood).strip()
 
     url = "https://api.tavily.com/search"
+    # Exact phrase matching on the neighborhood + property incident keywords, explicitly excluding generic roundups
+    clean_query = f'"{neighborhood}" (flood OR fire OR "building collapse" OR robbery OR gas explosion) -headlines -roundup -recap'
+
     payload = {
         "api_key": st.secrets["tavily"]["api_key"],
-        "query": f'"{query_location}" (flood OR fire OR robbery OR explosion OR "building collapse" OR unrest)',
+        "query": clean_query,
         "search_depth": "basic",
         "topic": "news",
-        "max_results": num_results,
+        "max_results": 10,
         "include_domains": [
             "punchng.com",
             "vanguardngr.com",
@@ -348,6 +349,42 @@ def fetch_area_news(resolved_address: str, num_results: int = 5):
             "channelstv.com",
         ],
     }
+
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        data = response.json()
+
+        if "error" in data:
+            return None, data["error"]
+
+        raw_items = data.get("results", [])
+        
+        # Post-filter: ensure the neighborhood actually appears in the text and reject generic digest headlines
+        filtered = []
+        n_lower = neighborhood.lower()
+        for item in raw_items:
+            title = item.get("title", "")
+            snippet = item.get("content", "")
+            combined = f"{title} {snippet}".lower()
+            
+            # Skip broad morning news roundups
+            if any(w in title.lower() for w in ["morning headlines", "morning recap", "news roundup", "top stories"]):
+                continue
+                
+            # Must mention the local area
+            if n_lower in combined:
+                filtered.append({
+                    "title": title,
+                    "snippet": snippet,
+                    "link": item.get("url")
+                })
+            if len(filtered) >= num_results:
+                break
+
+        return filtered, None
+    except Exception as e:
+        return None, str(e)[:100]
+
 
     try:
         response = requests.post(url, json=payload, timeout=10)
