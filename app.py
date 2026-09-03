@@ -199,7 +199,7 @@ def get_nearby_hazards(lat, lon, api_key):
     fuel_count, fuel_err = get_nearby_places_count(lat, lon, 1000, "gas_station", api_key)
     hosp_count, hosp_err = get_nearby_places_count(lat, lon, 2000, "hospital", api_key)
     school_count, school_err = get_nearby_places_count(lat, lon, 1000, "school", api_key)
-    fire_count, fire_err = get_nearby_places_count(lat, lon, 1500, "fire_station", api_key)
+    fire_count, fire_err = get_nearby_places_count(lat, lon, 200, "fire_station", api_key)
     commercial_count, commercial_err = get_nearby_places_count(lat, lon, 500, "store", api_key)
     return {
         "filling_stations": fuel_count, "filling_stations_error": fuel_err,
@@ -211,7 +211,6 @@ def get_nearby_hazards(lat, lon, api_key):
 
 
 def get_area_character(commercial_count):
-    """Rough inference of area character based on nearby commercial activity — NOT building detection."""
     if commercial_count is None:
         return "Unknown (data unavailable)"
 
@@ -228,7 +227,6 @@ def get_area_character(commercial_count):
         return "Mixed residential/commercial (some nearby businesses)"
     else:
         return "Likely commercial area (many nearby businesses)"
-
 
 
 WEATHER_CODES = {
@@ -305,67 +303,6 @@ def get_historical_weather_summary(lat, lon, days_back=365):
         }
     except Exception:
         return None
-
-
-def search_planet_imagery(lat, lon, api_key, days_back=60):
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=days_back)
-
-    geometry = {"type": "Point", "coordinates": [lon, lat]}
-
-    search_request = {
-        "item_types": ["PSScene"],
-        "filter": {
-            "type": "AndFilter",
-            "config": [
-                {"type": "GeometryFilter", "field_name": "geometry", "config": geometry},
-                {
-                    "type": "DateRangeFilter",
-                    "field_name": "acquired",
-                    "config": {
-                        "gte": start_date.strftime("%Y-%m-%dT00:00:00.000Z"),
-                        "lte": end_date.strftime("%Y-%m-%dT23:59:59.000Z")
-                    }
-                },
-                {"type": "RangeFilter", "field_name": "cloud_cover", "config": {"lte": 0.5}}
-            ]
-        }
-    }
-
-    try:
-        response = requests.post(
-            "https://api.planet.com/data/v1/quick-search",
-            auth=(api_key, ""),
-            json=search_request,
-            timeout=20
-        )
-        if response.status_code != 200:
-            return None, f"HTTP {response.status_code}: {response.text[:150]}"
-
-        data = response.json()
-        features = data.get("features", [])
-        if not features:
-            return None, "No clear Planet imagery found in this date range for this location."
-
-        best = min(features, key=lambda f: f["properties"].get("cloud_cover", 1))
-        return {
-            "id": best["id"],
-            "acquired": best["properties"].get("acquired"),
-            "cloud_cover": best["properties"].get("cloud_cover"),
-            "thumbnail_url": best.get("_links", {}).get("thumbnail"),
-        }, None
-    except Exception as e:
-        return None, str(e)[:150]
-
-
-def get_planet_thumbnail(thumbnail_url, api_key):
-    try:
-        response = requests.get(thumbnail_url, auth=(api_key, ""), timeout=20)
-        if response.status_code == 200:
-            return response.content
-    except Exception:
-        pass
-    return None
 
 
 def log_assessment(result):
@@ -458,7 +395,7 @@ def generate_pdf_report(result):
         line(f"Filling stations within 1km: {hazards.get('filling_stations', 'N/A')}")
         line(f"Hospitals within 2km: {hazards.get('hospitals', 'N/A')}")
         line(f"Schools within 1km: {hazards.get('schools', 'N/A')}")
-        line(f"Fire stations within 1.5km: {hazards.get('fire_stations', 'N/A')}")
+        line(f"Fire stations within 200m: {hazards.get('fire_stations', 'N/A')}")
         line(f"Area character: {result.get('area_character', 'N/A')}")
         y -= 4 * mm
 
@@ -505,7 +442,7 @@ def run_assessment(latitude, longitude, resolved_address, api_key):
     collection = (
         ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
         .filterBounds(area)
-        .filterDate('2026-01-01', '2026-09-02')
+        .filterDate('2026-01-01', '2026-09-03')
         .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 15))
         .sort('CLOUDY_PIXEL_PERCENTAGE')
     )
@@ -604,8 +541,6 @@ def run_assessment(latitude, longitude, resolved_address, api_key):
         "hazards": hazards, "area_character": area_character,
         "weather": weather, "historical_weather": historical_weather,
     }
-
-
 # ============================== UI ==============================
 
 st.title("🛰️ RiskEye")
@@ -623,7 +558,7 @@ with st.expander("Enter coordinates manually instead"):
         manual_lon = st.text_input("Longitude")
 
 st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-st.markdown("### Sum Insured Check (optional)")
+st.markdown("### 💰 Sum Insured Check (optional)")
 st.caption("Select the building type and enter the declared value to check for possible underinsurance. This is an indicative estimate, not a certified valuation.")
 
 col3, col4, col5 = st.columns(3)
@@ -636,7 +571,7 @@ with col5:
     cost_per_sqm = st.number_input("Cost benchmark (₦/sqm)", min_value=0, step=10000, value=default_cost)
 
 st.write("")
-run_clicked = st.button(" Run Risk Assessment", type="primary", use_container_width=False)
+run_clicked = st.button("🔍 Run Risk Assessment", type="primary", use_container_width=False)
 
 if run_clicked:
     st.session_state.result = None
@@ -702,7 +637,7 @@ if "result" in st.session_state and st.session_state.result:
 
     st.info(f"**Recommendation:** {result['recommendation']}")
 
-    st.markdown("#### Recommended Actions")
+    st.markdown("####  Recommended Actions")
     st.caption("Based on location risk factors only — building-specific issues (roof, wiring, structure) require a physical or drone inspection.")
     for action in result["actions"]:
         st.markdown(f"- {action}")
@@ -720,7 +655,8 @@ if "result" in st.session_state and st.session_state.result:
     h1.metric("Filling stations (1km)", fs if fs is not None else "N/A")
     h2.metric("Hospitals (2km)", hs if hs is not None else "N/A")
     h3.metric("Schools (1km)", sc if sc is not None else "N/A")
-    h4.metric("Fire stations (1.5km)", fr if fr is not None else "N/A")
+    h4.metric("Fire stations (200m)", fr if fr is not None else "N/A")
+    st.caption("Fire station count uses a tight 200m radius — a result of 0 is common and does not necessarily mean no coverage exists nearby.")
 
     st.write("")
     st.metric("Area character (inferred)", result.get("area_character", "Unknown"))
@@ -735,7 +671,17 @@ if "result" in st.session_state and st.session_state.result:
     st.caption("Counts from Google Places (within radius shown). Coverage is generally strong in major Nigerian cities.")
 
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-    st.markdown("### Weather Conditions")
+    st.markdown("### 📰 Area News & Incidents")
+    st.warning(
+        "This feature is not yet connected to a live search provider. Setting it up requires a separate "
+        "search API (e.g. Google Custom Search) with its own key and billing — the same pattern used for "
+        "geocoding and Places. Once configured, results shown here will be general, unverified web search "
+        "hits for the area, not confirmed property-specific findings, and must be reviewed by a person "
+        "before being treated as fact."
+    )
+
+    st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
+    st.markdown("###  Weather Conditions")
     weather = result.get("weather")
     hist_weather = result.get("historical_weather")
 
@@ -798,31 +744,9 @@ if "result" in st.session_state and st.session_state.result:
     else:
         st.caption("Close-up image is only shown for properties flagged Medium or High risk (this one is Low).")
 
-    if "planet_labs" in st.secrets:
-        st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-        st.markdown("### 🪐 Planet Labs Imagery (Trial)")
-        st.caption("Daily-refresh satellite imagery from Planet Labs — sharper and fresher than Sentinel-2. Available during trial access only.")
-
-        planet_key = st.secrets["planet_labs"]["api_key"]
-        with st.spinner("Searching Planet Labs archive..."):
-            planet_result, planet_err = search_planet_imagery(
-                result["latitude"], result["longitude"], planet_key
-            )
-
-        if planet_result:
-            st.write(f"**Image acquired:** {planet_result['acquired']} • **Cloud cover:** {planet_result['cloud_cover']*100:.1f}%")
-            if planet_result.get("thumbnail_url"):
-                thumb_bytes = get_planet_thumbnail(planet_result["thumbnail_url"], planet_key)
-                if thumb_bytes:
-                    st.image(thumb_bytes, caption="Planet Labs PlanetScope thumbnail")
-                else:
-                    st.caption("Thumbnail could not be retrieved (may require full authentication flow).")
-        else:
-            st.warning(f"Planet Labs imagery unavailable: {planet_err}")
-
     if result.get("declared_value", 0) > 0:
         st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-        st.markdown("### Sum Insured Check")
+        st.markdown("###  Sum Insured Check")
 
         estimated_sqm = result["estimated_built_sqm"]
         estimated_cost = estimated_sqm * result["cost_per_sqm"]
