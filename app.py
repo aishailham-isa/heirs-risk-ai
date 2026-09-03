@@ -304,18 +304,71 @@ def get_historical_weather_summary(lat, lon, days_back=365):
     except Exception:
         return None
 
-def fetch_area_news(query_location: str, num_results: int = 5):
-    """Searches live news and incidents via Tavily API."""
+def fetch_area_news(resolved_address: str, num_results: int = 5):
+    """Searches trusted Nigerian news outlets for area-specific incidents across Nigeria."""
     if "tavily" not in st.secrets:
         return None, "Tavily API key not configured in secrets."
+
+    if not resolved_address:
+        return [], None
+
+    # Clean address tokens for any Nigerian location
+    parts = [p.strip() for p in resolved_address.split(",") if p.strip()]
+    # Remove country and postal codes
+    parts = [p for p in parts if not re.search(r"\b(Nigeria|\d{5,6})\b", p, re.IGNORECASE)]
+
+    if not parts:
+        query_location = "Nigeria"
+    elif len(parts) == 1:
+        # e.g., "Maitama" or "107B Ajose Adeogun St" -> strip leading street numbers
+        query_location = re.sub(r"^\d+[A-Za-z\-/\s]*", "", parts[0]).strip()
+    else:
+        # e.g., "Victoria Island, Lagos" or "Wuse 2, Abuja"
+        local_area = re.sub(r"^\d+[A-Za-z\-/\s]*", "", parts[0]).strip()
+        region = parts[-1].strip()
+        query_location = f"{local_area} {region}".strip()
+
+    # Fallback to pure state/city if local string is empty
+    if not query_location:
+        query_location = parts[-1] if parts else "Nigeria"
 
     url = "https://api.tavily.com/search"
     payload = {
         "api_key": st.secrets["tavily"]["api_key"],
-        "query": f'"{query_location}" Nigeria (crime OR flood OR fire OR protest OR collapse OR robbery news)',
+        "query": f'"{query_location}" (flood OR fire OR robbery OR explosion OR "building collapse" OR unrest)',
         "search_depth": "basic",
-        "max_results": num_results
+        "topic": "news",
+        "max_results": num_results,
+        "include_domains": [
+            "punchng.com",
+            "vanguardngr.com",
+            "dailytrust.com",
+            "thecable.ng",
+            "premiumtimesng.com",
+            "channelstv.com",
+        ],
     }
+
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        data = response.json()
+
+        if "error" in data:
+            return None, data["error"]
+
+        items = data.get("results", [])
+        return [
+            {
+                "title": item.get("title"),
+                "snippet": item.get("content"),
+                "link": item.get("url"),
+            }
+            for item in items
+        ], None
+    except Exception as e:
+        return None, str(e)[:100]
+
+
 
     try:
         response = requests.post(url, json=payload, timeout=10)
@@ -620,7 +673,6 @@ def run_assessment(latitude, longitude, resolved_address, api_key):
 st.title("🛰️ RiskEye")
 st.caption("AI-assisted property risk screening using satellite imagery")
 
-st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
 st.markdown("### 📍 Property Location")
 address = st.text_input("Property address", placeholder="e.g. Wuye, Abuja, Nigeria", label_visibility="collapsed")
 
@@ -631,7 +683,7 @@ with st.expander("Enter coordinates manually instead"):
     with col2:
         manual_lon = st.text_input("Longitude")
 
-st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
 st.markdown("###  Sum Insured Check (optional)")
 st.caption("Select the building type and enter the declared value to check for possible underinsurance. This is an indicative estimate, not a certified valuation.")
 
@@ -747,28 +799,26 @@ if "result" in st.session_state and st.session_state.result:
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
     st.markdown("### 📰 Area News & Incidents")
 
-    raw_address = result.get("resolved_address", "")
-    query_locality = raw_address.split(",")[0].strip() if raw_address else ""
+    resolved_addr = result.get("resolved_address", "")
 
-    if not query_locality:
+    if not resolved_addr:
         st.info("No specific area identified for incident search.")
     else:
-        with st.spinner("Searching recent local news and incidents..."):
-            incidents, err = fetch_area_news(query_locality)
+        with st.spinner("Scanning Nigerian news desks for incidents in this locality..."):
+            incidents, err = fetch_area_news(resolved_addr)
 
         if err:
             st.warning(f"Search provider issue: {err}")
         elif incidents:
-            st.caption(f"Recent mentions referencing **{query_locality}**:")
+            st.caption(f"Curated incident alerts referencing the area for **{resolved_addr}**:")
             for item in incidents:
                 st.markdown(f"**[{item['title']}]({item['link']})**")
-                st.caption(item['snippet'])
+                st.caption(item["snippet"])
                 st.divider()
         else:
-            st.success(f"No major incidents indexed for {query_locality}.")
+            st.success(f"No major security, flood, or fire incidents indexed for {resolved_addr}.")
 
-   
-
+    
 
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
     st.markdown("###  Weather Conditions")
