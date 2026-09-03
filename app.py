@@ -312,7 +312,6 @@ def fetch_area_news(resolved_address: str, num_results: int = 5):
     if not resolved_address:
         return [], None
 
-    # Clean tokens
     raw_tokens = [p.strip() for p in resolved_address.split(",") if p.strip()]
     tokens = [
         t for t in raw_tokens 
@@ -347,6 +346,59 @@ def fetch_area_news(resolved_address: str, num_results: int = 5):
             "x.com"
         ],
     }
+
+    try:
+        response = requests.post(url, json=payload, timeout=12)
+        data = response.json()
+
+        if "error" in data:
+            return None, data["error"]
+
+        news_hits = []
+        loc_key = target_locality.lower()
+
+        for item in data.get("results", []):
+            title = item.get("title", "")
+            content = item.get("content", "").strip()
+            link = item.get("url", "")
+            combined = f"{title} {content}".lower()
+
+            if any(junk in link.lower() for junk in ["/tag/", "/category/", "/archives", "/author/"]):
+                continue
+            if any(term in title.lower() for term in ["archives", "morning headlines", "morning recap", "top stories"]):
+                continue
+            if len(content) < 60 or content.lower() in ["search button", "tacha"]:
+                continue
+
+            if loc_key not in combined:
+                continue
+
+            date_str = item.get("published_date")
+            if date_str:
+                date_str = date_str[:10]
+            else:
+                match = re.search(r"([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})", content)
+                date_str = match.group(1) if match else "Recent"
+
+            clean_body = re.sub(r"^(PunchNG Menu:|Photo:.*?|By .*?:|search button)\s*", "", content, flags=re.I).strip()
+            if len(clean_body) > 220:
+                clean_body = clean_body[:220].rsplit(" ", 1)[0] + "..."
+
+            news_hits.append({
+                "title": title,
+                "snippet": clean_body,
+                "link": link,
+                "date": date_str
+            })
+
+            if len(news_hits) >= num_results:
+                break
+
+        return news_hits, None
+    except Exception as e:
+        return None, str(e)[:100]
+
+
 
     try:
         response = requests.post(url, json=payload, timeout=12)
