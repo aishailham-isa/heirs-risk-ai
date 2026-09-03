@@ -305,20 +305,38 @@ def get_historical_weather_summary(lat, lon, days_back=365):
         return None
 
 def fetch_area_news(query_location: str, num_results: int = 5):
-    if "google_search" not in st.secrets:
-        return None, "Google Search secrets not configured."
+    """Searches live news and incidents via Tavily API."""
+    if "tavily" not in st.secrets:
+        return None, "Tavily API key not configured in secrets."
 
-    api_key = st.secrets["google_search"]["api_key"]
-    cx = st.secrets["google_search"]["cx"]
-
-    query = f'"{query_location}" (crime OR flood OR fire OR protest OR collapse OR robbery)'
-    url = "https://www.googleapis.com/customsearch/v1"
-    params = {
-        "key": api_key,
-        "cx": cx,
-        "q": query,
-        "num": num_results,
+    url = "https://api.tavily.com/search"
+    payload = {
+        "api_key": st.secrets["tavily"]["api_key"],
+        "query": f'"{query_location}" Nigeria (crime OR flood OR fire OR protest OR collapse OR robbery news)',
+        "search_depth": "basic",
+        "max_results": num_results
     }
+
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        data = response.json()
+
+        if "error" in data:
+            return None, data["error"]
+
+        results = [
+            {
+                "title": res.get("title"),
+                "snippet": res.get("content"),
+                "link": res.get("url")
+            }
+            for res in data.get("results", [])
+        ]
+        return results, None
+    except Exception as e:
+        return None, str(e)[:100]
+
+
 
     try:
         response = requests.get(url, params=params, timeout=10)
