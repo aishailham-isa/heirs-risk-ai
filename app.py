@@ -305,7 +305,6 @@ def get_historical_weather_summary(lat, lon, days_back=365):
         return None
 
 def fetch_area_news(query_location: str, num_results: int = 5):
-    """Searches curated Nigerian news sources for area incidents."""
     if "google_search" not in st.secrets:
         return None, "Google Search secrets not configured."
 
@@ -320,6 +319,27 @@ def fetch_area_news(query_location: str, num_results: int = 5):
         "q": query,
         "num": num_results,
     }
+
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        data = response.json()
+
+        if "error" in data:
+            return None, data["error"].get("message", "Search API error")
+
+        items = data.get("items", [])
+        return [
+            {
+                "title": item.get("title"),
+                "snippet": item.get("snippet"),
+                "link": item.get("link"),
+            }
+            for item in items
+        ], None
+    except Exception as e:
+        return None, str(e)[:100]
+
+
 
     try:
         response = requests.get(url, params=params, timeout=10)
@@ -709,28 +729,27 @@ if "result" in st.session_state and st.session_state.result:
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
     st.markdown("### 📰 Area News & Incidents")
 
-# Uses the address stored in your result dictionary or session
-query_locality = (
-    result.get("formatted_address", "").split(",")[0].strip()
-    if result.get("formatted_address")
-    else ""
-)
+    raw_address = result.get("resolved_address", "")
+    query_locality = raw_address.split(",")[0].strip() if raw_address else ""
 
-if not query_locality:
-    st.info("No specific area identified for incident search.")
-else:
-    incidents, err = fetch_area_news(query_locality)
-
-    if err:
-        st.warning(f"Search provider issue: {err}")
-    elif incidents:
-        st.caption(f"Recent mentions referencing **{query_locality}**:")
-        for item in incidents:
-            st.markdown(f"**[{item['title']}]({item['link']})**")
-            st.caption(item['snippet'])
-            st.divider()
+    if not query_locality:
+        st.info("No specific area identified for incident search.")
     else:
-        st.success(f"No major incidents indexed for {query_locality}.")
+        with st.spinner("Searching recent local news and incidents..."):
+            incidents, err = fetch_area_news(query_locality)
+
+        if err:
+            st.warning(f"Search provider issue: {err}")
+        elif incidents:
+            st.caption(f"Recent mentions referencing **{query_locality}**:")
+            for item in incidents:
+                st.markdown(f"**[{item['title']}]({item['link']})**")
+                st.caption(item['snippet'])
+                st.divider()
+        else:
+            st.success(f"No major incidents indexed for {query_locality}.")
+
+   
 
 
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
