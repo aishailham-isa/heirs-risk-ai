@@ -305,203 +305,49 @@ def get_historical_weather_summary(lat, lon, days_back=365):
         return None
 
 def fetch_area_news(resolved_address: str, num_results: int = 5):
-    """Searches news desks and public sources for incidents strictly tied to the locality within the past year."""
+    """Searches news desks and public platforms for incidents within the last 12 months."""
     if "tavily" not in st.secrets:
         return None, "Tavily API key not configured in secrets."
 
     if not resolved_address:
         return [], None
 
-    # Clean tokens
     raw_tokens = [p.strip() for p in resolved_address.split(",") if p.strip()]
     tokens = [
         t for t in raw_tokens 
         if not re.search(r"^\d+$", t) and not re.search(r"\b(Nigeria|\d{5,6})\b", t, re.I)
     ]
 
-    if tokens:
-        target_locality = re.sub(r"^\d+[A-Za-z\-/\s]*", "", tokens[0]).strip()
-        target_locality = re.sub(r"(Street|St|Road|Rd|Close|Cl|Crescent|Way|Avenue|Ave)\b", "", target_locality, flags=re.I).strip()
+    if len(tokens) >= 2:
+        locality = re.sub(r"^\d+[A-Za-z\-/\s]*", "", tokens[1]).strip()
+        state = tokens[-1].strip()
+        target_location = f"{locality} {state}"
+    elif tokens:
+        target_location = re.sub(r"^\d+[A-Za-z\-/\s]*", "", tokens[0]).strip()
     else:
-        target_locality = "Lagos"
+        target_location = "Lagos Nigeria"
 
-    if not target_locality and len(tokens) > 1:
-        target_locality = tokens[1].strip()
-
-    search_query = f'"{target_locality}" (flood OR fire OR "building collapse" OR robbery OR "gas explosion" OR unrest) -tag -category -archive'
+    target_location = re.sub(r"(Street|St|Road|Rd|Close|Cl|Crescent|Way|Avenue|Ave)\b", "", target_location, flags=re.I).strip()
 
     url = "https://api.tavily.com/search"
     payload = {
         "api_key": st.secrets["tavily"]["api_key"],
-        "query": search_query,
+        "query": f"{target_location} (flood OR fire OR building collapse OR robbery OR gas explosion OR unrest)",
         "search_depth": "advanced",
-        "time_range": "year",
-        "max_results": 15,
+        "time_range": "year", # Caps results to the last 12 months max
+        "max_results": 10,
         "include_domains": [
             "punchng.com",
             "vanguardngr.com",
             "dailytrust.com",
             "thecable.ng",
             "channelstv.com",
-            "nairaland.com",
-            "x.com"
+            "nairaland.com", # Nigeria's largest public discussion forum
+            "x.com", # Social posts / live incident updates
+            "twitter.com"
+            "lindaikejiblog.com", # Popular Nigerian blog with news and gossip
         ],
     }
-
-    try:
-        response = requests.post(url, json=payload, timeout=12)
-        data = response.json()
-
-        if "error" in data:
-            return None, data["error"]
-
-        news_hits = []
-        loc_key = target_locality.lower()
-
-        for item in data.get("results", []):
-            title = item.get("title", "")
-            content = item.get("content", "").strip()
-            link = item.get("url", "")
-            combined = f"{title} {content}".lower()
-
-            # 1. Skip tag archives, category listings, and navigation dumps
-            if any(junk in link.lower() for junk in ["/tag/", "/category/", "/archives", "/author/"]):
-                continue
-            if any(term in title.lower() for term in ["archives", "morning headlines", "morning recap", "top stories"]):
-                continue
-            if len(content) < 60 or content.lower() in ["search button", "tacha"]:
-                continue
-
-            # 2. Strict locality verification
-            if loc_key not in combined:
-                continue
-
-            # 3. Extract date: check Tavily metadata first, then look for date pattern in the body
-            date_str = item.get("published_date")
-            if date_str:
-                date_str = date_str[:10]
-            else:
-                # Matches formats like: "March 21, 2026", "21 May 2026", etc.
-                match = re.search(r"([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})", content)
-                date_str = match.group(1) if match else "Recent"
-
-            # Clean UI snippet (strip leading photo credits, menu junk, button text)
-            clean_body = re.sub(r"^(PunchNG Menu:|Photo:.*?|By .*?:|search button)\s*", "", content, flags=re.I).strip()
-            if len(clean_body) > 220:
-                clean_body = clean_body[:220].rsplit(" ", 1)[0] + "..."
-
-            news_hits.append({
-                "title": title,
-                "snippet": clean_body,
-                "link": link,
-                "date": date_str
-            })
-
-            if len(news_hits) >= num_results:
-                break
-
-        return news_hits, None
-    except Exception as e:
-        return None, str(e)[:100]
-
-
-    try:
-        response = requests.post(url, json=payload, timeout=12)
-        data = response.json()
-
-        if "error" in data:
-            return None, data["error"]
-
-        news_hits = []
-        loc_key = target_locality.lower()
-
-        for item in data.get("results", []):
-            title = item.get("title", "")
-            content = item.get("content", "").strip()
-            link = item.get("url", "")
-            combined = f"{title} {content}".lower()
-
-            # 1. Skip tag archives, category listings, and navigation dumps
-            if any(junk in link.lower() for junk in ["/tag/", "/category/", "/archives", "/author/"]):
-                continue
-            if any(term in title.lower() for term in ["archives", "morning headlines", "morning recap", "top stories"]):
-                continue
-            if len(content) < 60 or content.lower() in ["search button", "tacha"]:
-                continue
-
-            # 2. Strict locality verification
-            if loc_key not in combined:
-                continue
-
-            # 3. Extract date: check Tavily metadata first, then look for date pattern in the body
-            date_str = item.get("published_date")
-            if date_str:
-                date_str = date_str[:10]
-            else:
-                # Matches formats like: "March 21, 2026", "21 May 2026", etc.
-                match = re.search(r"([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})", content)
-                date_str = match.group(1) if match else "Recent"
-
-            # Clean UI snippet (strip leading photo credits, menu junk, button text)
-            clean_body = re.sub(r"^(PunchNG Menu:|Photo:.*?|By .*?:|search button)\s*", "", content, flags=re.I).strip()
-            if len(clean_body) > 220:
-                clean_body = clean_body[:220].rsplit(" ", 1)[0] + "..."
-
-            news_hits.append({
-                "title": title,
-                "snippet": clean_body,
-                "link": link,
-                "date": date_str
-            })
-
-            if len(news_hits) >= num_results:
-                break
-
-        return news_hits, None
-    except Exception as e:
-        return None, str(e)[:100]
-
-
-    try:
-        response = requests.post(url, json=payload, timeout=12)
-        data = response.json()
-
-        if "error" in data:
-            return None, data["error"]
-
-        news_hits = []
-        loc_key = target_locality.lower()
-
-        for item in data.get("results", []):
-            title = item.get("title", "")
-            content = item.get("content", "")
-            combined = f"{title} {content}".lower()
-
-            # Skip generic morning summaries/roundups
-            if any(term in title.lower() for term in ["morning headlines", "morning recap", "top stories"]):
-                continue
-
-            # Strict verification: the article must actually mention the neighborhood
-            if loc_key not in combined:
-                continue
-
-            raw_date = item.get("published_date")
-            date_str = raw_date[:10] if raw_date else "Past 12 months"
-
-            news_hits.append({
-                "title": title,
-                "snippet": content,
-                "link": item.get("url", ""),
-                "date": date_str
-            })
-
-            if len(news_hits) >= num_results:
-                break
-
-        return news_hits, None
-    except Exception as e:
-        return None, str(e)[:100]
-
 
     try:
         response = requests.post(url, json=payload, timeout=12)
