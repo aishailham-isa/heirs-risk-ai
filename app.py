@@ -312,33 +312,32 @@ def fetch_area_news(resolved_address: str, num_results: int = 5):
     if not resolved_address:
         return [], None
 
-    # Extract clean neighborhood / town name
-    parts = [p.strip() for p in resolved_address.split(",") if p.strip()]
-    parts = [p for p in parts if not re.search(r"\b(Nigeria|\d{5,6})\b", p, re.IGNORECASE)]
+    # 1. Clean out digits, postal codes, and pure country labels
+    raw_tokens = [p.strip() for p in resolved_address.split(",") if p.strip()]
+    tokens = [
+        t for t in raw_tokens 
+        if not re.search(r"^\d+$", t) and not re.search(r"\b(Nigeria|\d{5,6})\b", t, re.I)
+    ]
 
-    if len(parts) >= 2:
-        # Prioritize neighborhood (e.g. Victoria Island, Wuye, Ikeja)
-        neighborhood = parts[1] if re.search(r"^\d+", parts[0]) else parts[0]
-        region = parts[-1]
-    elif parts:
-        neighborhood = re.sub(r"^\d+[A-Za-z\-/\s]*", "", parts[0]).strip()
-        region = "Nigeria"
+    # 2. Extract District / Town and State
+    # e.g. "107B Ajose Adeogun St, Victoria Island, Lagos" -> focus on "Victoria Island Lagos"
+    if len(tokens) >= 2:
+        locality = re.sub(r"^\d+[A-Za-z\-/\s]*", "", tokens[1]).strip()
+        state = tokens[-1].strip()
+        target_location = f"{locality} {state}"
+    elif tokens:
+        target_location = re.sub(r"^\d+[A-Za-z\-/\s]*", "", tokens[0]).strip()
     else:
-        neighborhood = "Nigeria"
-        region = ""
+        target_location = "Lagos Nigeria"
 
-    # Clean punctuation
-    neighborhood = re.sub(r"^\d+[A-Za-z]?\s*", "", neighborhood).strip()
+    # Remove lingering noise words
+    target_location = re.sub(r"(Street|St|Road|Rd|Close|Cl|Crescent|Way|Avenue|Ave)\b", "", target_location, flags=re.I).strip()
 
     url = "https://api.tavily.com/search"
-    # Exact phrase matching on the neighborhood + property incident keywords, explicitly excluding generic roundups
-    clean_query = f'"{neighborhood}" (flood OR fire OR "building collapse" OR robbery OR gas explosion) -headlines -roundup -recap'
-
     payload = {
         "api_key": st.secrets["tavily"]["api_key"],
-        "query": clean_query,
-        "search_depth": "basic",
-        "topic": "news",
+        "query": f"{target_location} (flood OR fire OR building collapse OR robbery OR gas explosion incident news)",
+        "search_depth": "advanced",
         "max_results": 10,
         "include_domains": [
             "punchng.com",
@@ -349,6 +348,36 @@ def fetch_area_news(resolved_address: str, num_results: int = 5):
             "channelstv.com",
         ],
     }
+
+    try:
+        response = requests.post(url, json=payload, timeout=12)
+        data = response.json()
+
+        if "error" in data:
+            return None, data["error"]
+
+        items = data.get("results", [])
+        news_hits = []
+        for item in items:
+            title = item.get("title", "")
+            # Skip multi-story daily digests/roundups
+            if any(term in title.lower() for term in ["morning headlines", "morning recap", "top stories", "today in news"]):
+                continue
+
+            news_hits.append({
+                "title": title,
+                "snippet": item.get("content", ""),
+                "link": item.get("url", ""),
+            })
+
+            if len(news_hits) >= num_results:
+                break
+
+        return news_hits, None
+    except Exception as e:
+        return None, str(e)[:100]
+
+
 
     try:
         response = requests.post(url, json=payload, timeout=10)
@@ -847,15 +876,15 @@ if "result" in st.session_state and st.session_state.result:
         if err:
             st.warning(f"Search provider issue: {err}")
         elif incidents:
-            st.caption(f"Curated incident alerts referencing the area for **{resolved_addr}**:")
+            st.caption(f"Curated incident alerts for **{resolved_addr}**:")
             for item in incidents:
                 st.markdown(f"**[{item['title']}]({item['link']})**")
                 st.caption(item["snippet"])
                 st.divider()
         else:
-            st.success(f"No major security, flood, or fire incidents indexed for {resolved_addr}.")
+            st.info(f"No major flood, fire, or collapse alerts currently reported for this area.")
 
-    
+
 
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
     st.markdown("###  Weather Conditions")
