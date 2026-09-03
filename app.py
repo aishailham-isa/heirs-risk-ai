@@ -304,6 +304,42 @@ def get_historical_weather_summary(lat, lon, days_back=365):
     except Exception:
         return None
 
+def fetch_area_news(query_location: str, num_results: int = 5):
+    """Searches curated Nigerian news sources for area incidents."""
+    if "google_search" not in st.secrets:
+        return None, "Google Search secrets not configured."
+
+    api_key = st.secrets["google_search"]["api_key"]
+    cx = st.secrets["google_search"]["cx"]
+
+    query = f'"{query_location}" (crime OR flood OR fire OR protest OR collapse OR robbery)'
+    url = "https://www.googleapis.com/customsearch/v1"
+    params = {
+        "key": api_key,
+        "cx": cx,
+        "q": query,
+        "num": num_results,
+    }
+
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        data = response.json()
+
+        if "error" in data:
+            return None, data["error"].get("message", "Search API error")
+
+        items = data.get("items", [])
+        return [
+            {
+                "title": item.get("title"),
+                "snippet": item.get("snippet"),
+                "link": item.get("link"),
+            }
+            for item in items
+        ], None
+    except Exception as e:
+        return None, str(e)[:100]
+
 
 def log_assessment(result):
     try:
@@ -558,7 +594,7 @@ with st.expander("Enter coordinates manually instead"):
         manual_lon = st.text_input("Longitude")
 
 st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-st.markdown("### 💰 Sum Insured Check (optional)")
+st.markdown("###  Sum Insured Check (optional)")
 st.caption("Select the building type and enter the declared value to check for possible underinsurance. This is an indicative estimate, not a certified valuation.")
 
 col3, col4, col5 = st.columns(3)
@@ -571,7 +607,7 @@ with col5:
     cost_per_sqm = st.number_input("Cost benchmark (₦/sqm)", min_value=0, step=10000, value=default_cost)
 
 st.write("")
-run_clicked = st.button("🔍 Run Risk Assessment", type="primary", use_container_width=False)
+run_clicked = st.button(" Run Risk Assessment", type="primary", use_container_width=False)
 
 if run_clicked:
     st.session_state.result = None
@@ -672,13 +708,30 @@ if "result" in st.session_state and st.session_state.result:
 
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
     st.markdown("### 📰 Area News & Incidents")
-    st.warning(
-        "This feature is not yet connected to a live search provider. Setting it up requires a separate "
-        "search API (e.g. Google Custom Search) with its own key and billing — the same pattern used for "
-        "geocoding and Places. Once configured, results shown here will be general, unverified web search "
-        "hits for the area, not confirmed property-specific findings, and must be reviewed by a person "
-        "before being treated as fact."
-    )
+
+# Uses the address stored in your result dictionary or session
+query_locality = (
+    result.get("formatted_address", "").split(",")[0].strip()
+    if result.get("formatted_address")
+    else ""
+)
+
+if not query_locality:
+    st.info("No specific area identified for incident search.")
+else:
+    incidents, err = fetch_area_news(query_locality)
+
+    if err:
+        st.warning(f"Search provider issue: {err}")
+    elif incidents:
+        st.caption(f"Recent mentions referencing **{query_locality}**:")
+        for item in incidents:
+            st.markdown(f"**[{item['title']}]({item['link']})**")
+            st.caption(item['snippet'])
+            st.divider()
+    else:
+        st.success(f"No major incidents indexed for {query_locality}.")
+
 
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
     st.markdown("###  Weather Conditions")
