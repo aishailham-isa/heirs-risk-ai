@@ -229,6 +229,114 @@ def get_area_character(commercial_count):
         return "Likely commercial area (many nearby businesses)"
 
 
+def extract_search_locality(resolved_address: str) -> str:
+    """Picks the most informative Nigerian locality/area from the resolved address,
+    skipping generic venue names like 'The Civic Centre' or 'Plot 4'."""
+    parts = [p.strip() for p in resolved_address.split(",") if p.strip()]
+
+    generic_words = {
+        "centre", "center", "hall", "plaza", "hotel", "house", "mall",
+        "plot", "street", "road", "close", "avenue", "drive"
+    }
+
+    selected_area = ""
+    for part in parts:
+        words = set(re.findall(r"\w+", part.lower()))
+        if words and not words.intersection(generic_words) and part.lower() not in {"nigeria", "lagos"}:
+            selected_area = part
+            break
+
+    if not selected_area and len(parts) >= 2:
+        selected_area = parts[1]
+    elif not selected_area:
+        selected_area = parts[0] if parts else "Lagos"
+
+    return selected_area.strip()
+
+
+def fetch_area_news(resolved_address: str, num_results: int = 5):
+    """Fetches risk-related incidents (flood, fire, collapse, security) whose HEADLINE
+    specifically names the locality — reduces false matches from articles that only
+    mention the area in passing among many others."""
+    if "tavily" not in st.secrets:
+        return None, "Tavily API key not configured in secrets."
+
+    if not resolved_address:
+        return [], None
+
+    locality = extract_search_locality(resolved_address)
+    if not locality:
+        return [], None
+
+    risk_terms = '(flood OR fire OR collapse OR submerged OR robbery OR "gas explosion" OR unrest)'
+    query = f'"{locality}" {risk_terms} Nigeria -tag -category -archive'
+
+    url = "https://api.tavily.com/search"
+    payload = {
+        "api_key": st.secrets["tavily"]["api_key"],
+        "query": query,
+        "search_depth": "advanced",
+        "time_range": "year",
+        "max_results": 15,
+        "include_domains": [
+            "punchng.com", "vanguardngr.com", "thenationonlineng.net",
+            "premiumtimesng.com", "thecable.ng", "dailypost.ng",
+            "channelstv.com", "dailytrust.com",
+        ],
+    }
+
+    try:
+        response = requests.post(url, json=payload, timeout=12)
+        data = response.json()
+
+        if "error" in data:
+            return None, data["error"]
+
+        loc_key = locality.lower()
+        incidents = []
+
+        for item in data.get("results", []):
+            title = item.get("title", "")
+            content = item.get("content", item.get("snippet", "")).strip()
+            link = item.get("url", item.get("link", "#"))
+
+            if any(junk in link.lower() for junk in ["/tag/", "/category/", "/archives", "/author/"]):
+                continue
+            if any(term in title.lower() for term in ["archives", "morning headlines", "morning recap", "top stories"]):
+                continue
+            if len(content) < 60:
+                continue
+
+            if loc_key not in title.lower():
+                continue
+
+            date_str = item.get("published_date")
+            if date_str:
+                date_str = date_str[:10]
+            else:
+                match = re.search(r"([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})", content)
+                date_str = match.group(1) if match else "Recent"
+
+            clean_body = re.sub(r"^(PunchNG Menu:|Photo:.*?|By .*?:|search button)\s*", "", content, flags=re.I).strip()
+            if len(clean_body) > 220:
+                clean_body = clean_body[:220].rsplit(" ", 1)[0] + "..."
+
+            incidents.append({
+                "title": title,
+                "snippet": clean_body,
+                "link": link,
+                "date": date_str,
+                "matched_on": locality,
+            })
+
+            if len(incidents) >= num_results:
+                break
+
+        return incidents, None
+    except Exception as e:
+        return None, str(e)[:100]
+
+
 WEATHER_CODES = {
     0: "Clear sky", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
     45: "Fog", 48: "Depositing rime fog",
@@ -303,251 +411,6 @@ def get_historical_weather_summary(lat, lon, days_back=365):
         }
     except Exception:
         return None
-
-def fetch_area_news(resolved_address: str, num_results: int = 5):
-    """Searches news desks for incidents mentioning the locality by name in the headline —
-    tightened to reduce false matches from articles that only mention the area in passing."""
-    if "tavily" not in st.secrets:
-        return None, "Tavily API key not configured in secrets."
-
-    if not resolved_address:
-        return [], None
-
-    raw_tokens = [p.strip() for p in resolved_address.split(",") if p.strip()]
-    tokens = [
-        t for t in raw_tokens
-        if not re.search(r"^\d+$", t) and not re.search(r"\b(Nigeria|\d{5,6})\b", t, re.I)
-    ]
-
-    if tokens:
-        target_locality = re.sub(r"^\d+[A-Za-z\-/\s]*", "", tokens[0]).strip()
-        target_locality = re.sub(
-            r"(Street|St|Road|Rd|Close|Cl|Crescent|Way|Avenue|Ave)\b", "", target_locality, flags=re.I
-        ).strip()
-    else:
-        target_locality = "Lagos"
-
-    if not target_locality and len(tokens) > 1:
-        target_locality = tokens[1].strip()
-
-    search_query = f'"{target_locality}" (flood OR fire OR "building collapse" OR robbery OR "gas explosion" OR unrest) -tag -category -archive'
-
-    url = "https://api.tavily.com/search"
-    payload = {
-        "api_key": st.secrets["tavily"]["api_key"],
-        "query": search_query,
-        "search_depth": "advanced",
-        "time_range": "year",
-        "max_results": 15,
-        "include_domains": [
-            "punchng.com", "vanguardngr.com", "dailytrust.com",
-            "thecable.ng", "channelstv.com", "nairaland.com",
-        ],
-    }
-
-    try:
-        response = requests.post(url, json=payload, timeout=12)
-        data = response.json()
-
-        if "error" in data:
-            return None, data["error"]
-
-        news_hits = []
-        loc_key = target_locality.lower()
-
-        for item in data.get("results", []):
-            title = item.get("title", "")
-            content = item.get("content", "").strip()
-            link = item.get("url", "")
-
-            if any(junk in link.lower() for junk in ["/tag/", "/category/", "/archives", "/author/"]):
-                continue
-            if any(term in title.lower() for term in ["archives", "morning headlines", "morning recap", "top stories"]):
-                continue
-            if len(content) < 60 or content.lower() in ["search button", "tacha"]:
-                continue
-
-            # Tightened: require the locality name to appear in the TITLE, not just
-            # anywhere in the body — a strong signal the article is actually about
-            # this area, not just mentioning it in a list of many neighborhoods.
-            if loc_key not in title.lower():
-                continue
-
-            date_str = item.get("published_date")
-            if date_str:
-                date_str = date_str[:10]
-            else:
-                match = re.search(r"([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})", content)
-                date_str = match.group(1) if match else "Recent"
-
-            clean_body = re.sub(r"^(PunchNG Menu:|Photo:.*?|By .*?:|search button)\s*", "", content, flags=re.I).strip()
-            if len(clean_body) > 220:
-                clean_body = clean_body[:220].rsplit(" ", 1)[0] + "..."
-
-            news_hits.append({
-                "title": title,
-                "snippet": clean_body,
-                "link": link,
-                "date": date_str,
-                "matched_on": target_locality,
-            })
-
-            if len(news_hits) >= num_results:
-                break
-
-        return news_hits, None
-    except Exception as e:
-        return None, str(e)[:100]
-
-    try:
-        response = requests.post(url, json=payload, timeout=12)
-        data = response.json()
-
-        if "error" in data:
-            return None, data["error"]
-
-        news_hits = []
-        for item in data.get("results", []):
-            title = item.get("title", "")
-            if any(term in title.lower() for term in ["morning headlines", "morning recap", "top stories"]):
-                continue
-
-            # Format raw published date if available
-            raw_date = item.get("published_date")
-            date_str = raw_date[:10] if raw_date else "Past 12 months"
-
-            news_hits.append({
-                "title": title,
-                "snippet": item.get("content", ""),
-                "link": item.get("url", ""),
-                "date": date_str
-            })
-
-            if len(news_hits) >= num_results:
-                break
-
-        return news_hits, None
-    except Exception as e:
-        return None, str(e)[:100]
-
-
-    try:
-        response = requests.post(url, json=payload, timeout=10)
-        data = response.json()
-
-        if "error" in data:
-            return None, data["error"]
-
-        raw_items = data.get("results", [])
-        
-        # Post-filter: ensure the neighborhood actually appears in the text and reject generic digest headlines
-        filtered = []
-        n_lower = neighborhood.lower()
-        for item in raw_items:
-            title = item.get("title", "")
-            snippet = item.get("content", "")
-            combined = f"{title} {snippet}".lower()
-            
-            # Skip broad morning news roundups
-            if any(w in title.lower() for w in ["morning headlines", "morning recap", "news roundup", "top stories"]):
-                continue
-                
-            # Must mention the local area
-            if n_lower in combined:
-                filtered.append({
-                    "title": title,
-                    "snippet": snippet,
-                    "link": item.get("url")
-                })
-            if len(filtered) >= num_results:
-                break
-
-        return filtered, None
-    except Exception as e:
-        return None, str(e)[:100]
-
-
-    try:
-        response = requests.post(url, json=payload, timeout=10)
-        data = response.json()
-
-        if "error" in data:
-            return None, data["error"]
-
-        items = data.get("results", [])
-        return [
-            {
-                "title": item.get("title"),
-                "snippet": item.get("content"),
-                "link": item.get("url"),
-            }
-            for item in items
-        ], None
-    except Exception as e:
-        return None, str(e)[:100]
-
-
-
-    try:
-        response = requests.post(url, json=payload, timeout=10)
-        data = response.json()
-
-        if "error" in data:
-            return None, data["error"]
-
-        results = [
-            {
-                "title": res.get("title"),
-                "snippet": res.get("content"),
-                "link": res.get("url")
-            }
-            for res in data.get("results", [])
-        ]
-        return results, None
-    except Exception as e:
-        return None, str(e)[:100]
-
-
-
-    try:
-        response = requests.get(url, params=params, timeout=10)
-        data = response.json()
-
-        if "error" in data:
-            return None, data["error"].get("message", "Search API error")
-
-        items = data.get("items", [])
-        return [
-            {
-                "title": item.get("title"),
-                "snippet": item.get("snippet"),
-                "link": item.get("link"),
-            }
-            for item in items
-        ], None
-    except Exception as e:
-        return None, str(e)[:100]
-
-
-
-    try:
-        response = requests.get(url, params=params, timeout=10)
-        data = response.json()
-
-        if "error" in data:
-            return None, data["error"].get("message", "Search API error")
-
-        items = data.get("items", [])
-        return [
-            {
-                "title": item.get("title"),
-                "snippet": item.get("snippet"),
-                "link": item.get("link"),
-            }
-            for item in items
-        ], None
-    except Exception as e:
-        return None, str(e)[:100]
 
 
 def log_assessment(result):
@@ -687,7 +550,7 @@ def run_assessment(latitude, longitude, resolved_address, api_key):
     collection = (
         ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
         .filterBounds(area)
-        .filterDate('2026-01-01', '2026-09-03')
+        .filterDate('2026-01-01', '2026-09-04')
         .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 15))
         .sort('CLOUDY_PIXEL_PERCENTAGE')
     )
@@ -791,6 +654,7 @@ def run_assessment(latitude, longitude, resolved_address, api_key):
 st.title("🛰️ RiskEye")
 st.caption("AI-assisted property risk screening using satellite imagery")
 
+st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
 st.markdown("### 📍 Property Location")
 address = st.text_input("Property address", placeholder="e.g. Wuye, Abuja, Nigeria", label_visibility="collapsed")
 
@@ -801,7 +665,7 @@ with st.expander("Enter coordinates manually instead"):
     with col2:
         manual_lon = st.text_input("Longitude")
 
-    st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
+st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
 st.markdown("###  Sum Insured Check (optional)")
 st.caption("Select the building type and enter the declared value to check for possible underinsurance. This is an indicative estimate, not a certified valuation.")
 
@@ -889,8 +753,8 @@ if "result" in st.session_state and st.session_state.result:
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
     st.markdown("### 📰 Recent Nigerian News Mentioning This Area")
     st.caption(
-        "General web search results where the area name appears in the headline — not confirmed, "
-        "property-specific findings. Always verify relevance before treating as fact."
+        "Headline-level matches from Nigerian news sources — not confirmed, property-specific "
+        "findings. Always verify relevance before treating as fact."
     )
 
     with st.spinner("Scanning Nigerian news desks for incidents in this locality..."):
@@ -910,6 +774,8 @@ if "result" in st.session_state and st.session_state.result:
                 st.divider()
     else:
         st.info("No area-specific flood, fire, collapse, or security incidents found in headlines for this locality in the last year.")
+
+    st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
     st.markdown("###  Nearby Infrastructure")
     hazards = result.get("hazards", {})
     h1, h2, h3, h4 = st.columns(4)
@@ -936,34 +802,6 @@ if "result" in st.session_state and st.session_state.result:
     if fs_err or hs_err or sc_err or fr_err:
         st.caption(f"⚠️ Some lookups had issues: {fs_err or ''} {hs_err or ''} {sc_err or ''} {fr_err or ''}".strip())
     st.caption("Counts from Google Places (within radius shown). Coverage is generally strong in major Nigerian cities.")
-
-    st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-    st.markdown("### 📰 Area News & Incidents")
-
-    resolved_addr = result.get("resolved_address", "")
-
-    if not resolved_addr:
-        st.info("No specific area identified for incident search.")
-    else:
-        with st.spinner("Scanning Nigerian news desks for incidents in this locality..."):
-            incidents, err = fetch_area_news(resolved_addr)
-
-        if err:
-            st.warning(f"Search provider issue: {err}")
-        elif incidents:
-            st.caption(f"Curated incident alerts for **{resolved_addr}** (Last 12 Months):")
-            for item in incidents:
-                raw_snippet = item.get("snippet", "")
-                clean_snippet = raw_snippet.split("\n")[0].strip()
-                if len(clean_snippet) > 220:
-                    clean_snippet = clean_snippet[:220].rsplit(" ", 1)[0] + "..."
-
-                with st.container():
-                    st.markdown(f"**🔗 [{item['title']}]({item['link']})**")
-                    st.caption(f"🗓️ Published: `{item.get('date', 'Past 12 months')}`")
-                    st.write(f"<span style='color: #444; font-size: 0.9rem;'>{clean_snippet}</span>", unsafe_allow_html=True)
-                    st.divider()
-
 
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
     st.markdown("###  Weather Conditions")
@@ -1088,5 +926,5 @@ st.caption("⚠️ History is stored temporarily on the app server and may be cl
 history = load_history()
 if history:
     st.dataframe(history, use_container_width=True)
-else:
+else: 
     st.caption("No assessments logged yet.")
