@@ -196,11 +196,11 @@ def get_nearby_places_count(lat, lon, radius_m, place_type, api_key):
 
 
 def get_nearby_hazards(lat, lon, api_key):
-    fuel_count, fuel_err = get_nearby_places_count(lat, lon, 1000, "gas_station", api_key)
-    hosp_count, hosp_err = get_nearby_places_count(lat, lon, 2000, "hospital", api_key)
-    school_count, school_err = get_nearby_places_count(lat, lon, 1000, "school", api_key)
+    fuel_count, fuel_err = get_nearby_places_count(lat, lon, 200, "gas_station", api_key)
+    hosp_count, hosp_err = get_nearby_places_count(lat, lon, 200, "hospital", api_key)
+    school_count, school_err = get_nearby_places_count(lat, lon, 200, "school", api_key)
     fire_count, fire_err = get_nearby_places_count(lat, lon, 200, "fire_station", api_key)
-    commercial_count, commercial_err = get_nearby_places_count(lat, lon, 500, "store", api_key)
+    commercial_count, commercial_err = get_nearby_places_count(lat, lon, 200, "store", api_key)
     return {
         "filling_stations": fuel_count, "filling_stations_error": fuel_err,
         "hospitals": hosp_count, "hospitals_error": hosp_err,
@@ -500,9 +500,9 @@ def generate_pdf_report(result):
     hazards = result.get("hazards")
     if hazards:
         section_title("Nearby Infrastructure")
-        line(f"Filling stations within 1km: {hazards.get('filling_stations', 'N/A')}")
-        line(f"Hospitals within 2km: {hazards.get('hospitals', 'N/A')}")
-        line(f"Schools within 1km: {hazards.get('schools', 'N/A')}")
+        line(f"Filling stations within 200m: {hazards.get('filling_stations', 'N/A')}")
+        line(f"Hospitals within 200m: {hazards.get('hospitals', 'N/A')}")
+        line(f"Schools within 200m: {hazards.get('schools', 'N/A')}")
         line(f"Fire stations within 200m: {hazards.get('fire_stations', 'N/A')}")
         line(f"Area character: {result.get('area_character', 'N/A')}")
         y -= 4 * mm
@@ -785,11 +785,11 @@ if "result" in st.session_state and st.session_state.result:
     sc, sc_err = hazards.get("schools"), hazards.get("schools_error")
     fr, fr_err = hazards.get("fire_stations"), hazards.get("fire_stations_error")
 
-    h1.metric("Filling stations (1km)", fs if fs is not None else "N/A")
-    h2.metric("Hospitals (2km)", hs if hs is not None else "N/A")
-    h3.metric("Schools (1km)", sc if sc is not None else "N/A")
+    h1.metric("Filling stations (200m)", fs if fs is not None else "N/A")
+    h2.metric("Hospitals (200m)", hs if hs is not None else "N/A")
+    h3.metric("Schools (200m)", sc if sc is not None else "N/A")
     h4.metric("Fire stations (200m)", fr if fr is not None else "N/A")
-    st.caption("Fire station count uses a tight 200m radius — a result of 0 is common and does not necessarily mean no coverage exists nearby.")
+    st.caption("All nearby counts use a 200m radius. A result of 0 does not necessarily mean no wider coverage exists nearby.")
 
     st.write("")
     st.metric("Area character (inferred)", result.get("area_character", "Unknown"))
