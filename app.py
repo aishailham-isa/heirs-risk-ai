@@ -177,6 +177,28 @@ def get_street_view_image(lat, lon, api_key):
     return None, "FETCH_FAILED", None
 
 
+def populate_report_images(result, api_key=None):
+    if not api_key:
+        return result
+
+    if not result.get("street_view_image_bytes"):
+        image_bytes, sv_status, sv_date = get_street_view_image(result["latitude"], result["longitude"], api_key)
+        result["street_view_checked"] = True
+        if image_bytes:
+            result["street_view_image_bytes"] = image_bytes
+            result["street_view_date"] = sv_date
+        elif sv_status:
+            result["street_view_status"] = sv_status
+
+    if not result.get("static_image_bytes") and not result.get("street_view_image_bytes"):
+        image_bytes = get_static_map_image(result["latitude"], result["longitude"], api_key)
+        if image_bytes:
+            result["static_image_bytes"] = image_bytes
+            result["static_map_capture_date"] = "Capture date not provided by this data source"
+
+    return result
+
+
 def render_interactive_google_map(lat, lon, api_key, height=550):
     html = f"""
     <div id="map" style="height:{height}px;width:100%;border-radius:10px;overflow:hidden;"></div>
@@ -478,6 +500,8 @@ def generate_pdf_report(result):
         try:
             img = ImageReader(BytesIO(image_bytes))
             iw, ih = img.getSize()
+            if iw <= 0 or ih <= 0:
+                return
             ratio = min(max_width / iw, max_height / ih)
             w = iw * ratio
             h = ih * ratio
@@ -488,8 +512,13 @@ def generate_pdf_report(result):
             c.setFont("Helvetica-Bold", 10)
             c.drawString(margin, y, title)
             y -= 5 * mm
-            c.drawImage(img, margin, y - h, width=w, height=h)
-            y -= h + 8 * mm
+            image_y = y - h
+            if image_y < 20 * mm:
+                c.showPage()
+                y = height - margin
+                image_y = y - h
+            c.drawImage(img, margin, image_y, width=w, height=h)
+            y = image_y - 8 * mm
             if caption:
                 c.setFillColorRGB(0.2, 0.2, 0.2)
                 c.setFont("Helvetica", 8)
@@ -1019,6 +1048,8 @@ if "result" in st.session_state and st.session_state.result:
     else:
         st.caption("Close-up image is only shown for properties flagged Medium or High risk (this one is Low).")
 
+    if "gcp_static_maps" in st.secrets:
+        result = populate_report_images(result, st.secrets["gcp_static_maps"]["api_key"])
     pdf_buffer = generate_pdf_report(result)
     st.download_button(
         "Download PDF Report",
