@@ -21,19 +21,40 @@ st.markdown("""
     <style>
     .stMetric {
         background-color: #F7F5EF;
-        padding: 18px 16px;
-        border-radius: 12px;
+        padding: 20px 18px;
+        border-radius: 14px;
         border: 1px solid #E5E0D3;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.04);
     }
-    div[data-testid="stMetricValue"] { font-size: 19px; white-space: normal; }
-    div[data-testid="stMetricLabel"] { font-size: 13px; color: #555555; }
-    .block-container { padding-top: 2rem; max-width: 1100px; }
-    h2, h3 { color: #1F5C3F; }
-    .section-divider { margin: 28px 0 18px 0; }
+    div[data-testid="stMetricValue"] { font-size: 20px; font-weight: 600; white-space: normal; color: #1A1A1A; }
+    div[data-testid="stMetricLabel"] { font-size: 12.5px; color: #6B6B6B; text-transform: uppercase; letter-spacing: 0.3px; }
+    .block-container { padding-top: 2.2rem; max-width: 1080px; }
+    h2, h3 { color: #1F5C3F; font-weight: 600; }
+    h3 { border-bottom: 1px solid #E5E0D3; padding-bottom: 8px; margin-top: 8px; }
+    .section-divider { margin: 32px 0 20px 0; }
+    div[data-testid="stExpander"] { border: 1px solid #E5E0D3; border-radius: 10px; }
+    .stButton button { border-radius: 8px; font-weight: 600; }
+    .stAlert { border-radius: 10px; }
     </style>
 """, unsafe_allow_html=True)
 
 HISTORY_FILE = "assessment_history.csv"
+
+DATA_SOURCES = {
+    "Satellite imagery": "Sentinel-2 (COPERNICUS/S2_SR_HARMONIZED), via Google Earth Engine",
+    "Flood exposure": "JRC Global Surface Water (occurrence layer), via Google Earth Engine",
+    "Terrain / slope": "USGS SRTM 30m elevation model, via Google Earth Engine",
+    "Land cover classification": "ESA WorldCover v200, via Google Earth Engine",
+    "Nearby infrastructure": "Google Places API (Nearby Search)",
+    "Close-up / satellite close-up imagery": "Google Static Maps API",
+    "Street-level imagery": "Google Street View Static API (where available)",
+    "Interactive map": "Google Maps JavaScript API",
+    "Weather (current)": "Open-Meteo Forecast API",
+    "Weather (historical/rainfall)": "Open-Meteo Historical Archive API",
+    "Address geocoding": "OpenStreetMap Nominatim (primary), Google Geocoding API (fallback)",
+    "Area news": "Tavily Search API, restricted to named Nigerian news domains",
+    "Replacement cost estimate": "Satellite-derived built-up footprint × user-selected construction cost benchmark (internal estimate, not a licensed valuation source)",
+}
 
 
 @st.cache_resource
@@ -133,23 +154,26 @@ def get_static_map_image(lat, lon, api_key):
 
 
 def get_street_view_image(lat, lon, api_key):
+    """Returns (image_bytes, status, capture_date). capture_date is 'YYYY-MM' if provided by Google, else None."""
     metadata_url = "https://maps.googleapis.com/maps/api/streetview/metadata"
     params = {"location": f"{lat},{lon}", "key": api_key}
     try:
         response = requests.get(metadata_url, params=params, timeout=10)
         metadata = response.json()
     except Exception:
-        return None, "REQUEST_FAILED"
+        return None, "REQUEST_FAILED", None
 
     if metadata.get("status") != "OK":
-        return None, metadata.get("status", "UNKNOWN")
+        return None, metadata.get("status", "UNKNOWN"), None
+
+    capture_date = metadata.get("date")
 
     image_url = "https://maps.googleapis.com/maps/api/streetview"
     image_params = {"size": "640x400", "location": f"{lat},{lon}", "key": api_key}
     image_response = requests.get(image_url, params=image_params, timeout=10)
     if image_response.status_code == 200:
-        return image_response.content, "OK"
-    return None, "FETCH_FAILED"
+        return image_response.content, "OK", capture_date
+    return None, "FETCH_FAILED", None
 
 
 def render_interactive_google_map(lat, lon, api_key, height=550):
@@ -193,19 +217,19 @@ def get_nearby_places_count(lat, lon, radius_m, place_type, api_key):
             return None, status
     except Exception as e:
         return None, str(e)[:80]
-
-
 def get_nearby_hazards(lat, lon, api_key):
     fuel_count, fuel_err = get_nearby_places_count(lat, lon, 200, "gas_station", api_key)
-    hosp_count, hosp_err = get_nearby_places_count(lat, lon, 200, "hospital", api_key)
-    school_count, school_err = get_nearby_places_count(lat, lon, 200, "school", api_key)
+    hosp_count, hosp_err = get_nearby_places_count(lat, lon, 2000, "hospital", api_key)
+    school_count, school_err = get_nearby_places_count(lat, lon, 1000, "school", api_key)
     fire_count, fire_err = get_nearby_places_count(lat, lon, 200, "fire_station", api_key)
-    commercial_count, commercial_err = get_nearby_places_count(lat, lon, 200, "store", api_key)
+    police_count, police_err = get_nearby_places_count(lat, lon, 1500, "police", api_key)
+    commercial_count, commercial_err = get_nearby_places_count(lat, lon, 500, "store", api_key)
     return {
         "filling_stations": fuel_count, "filling_stations_error": fuel_err,
         "hospitals": hosp_count, "hospitals_error": hosp_err,
         "schools": school_count, "schools_error": school_err,
         "fire_stations": fire_count, "fire_stations_error": fire_err,
+        "police_stations": police_count, "police_stations_error": police_err,
         "commercial_nearby": commercial_count, "commercial_error": commercial_err,
     }
 
@@ -230,8 +254,6 @@ def get_area_character(commercial_count):
 
 
 def extract_search_locality(resolved_address: str) -> str:
-    """Picks the most informative Nigerian locality/area from the resolved address,
-    skipping generic venue names like 'The Civic Centre' or 'Plot 4'."""
     parts = [p.strip() for p in resolved_address.split(",") if p.strip()]
 
     generic_words = {
@@ -255,9 +277,6 @@ def extract_search_locality(resolved_address: str) -> str:
 
 
 def fetch_area_news(resolved_address: str, num_results: int = 5):
-    """Fetches risk-related incidents (flood, fire, collapse, security) whose HEADLINE
-    specifically names the locality — reduces false matches from articles that only
-    mention the area in passing among many others."""
     if "tavily" not in st.secrets:
         return None, "Tavily API key not configured in secrets."
 
@@ -443,6 +462,7 @@ def load_history():
     with open(HISTORY_FILE, "r", newline="") as f:
         reader = csv.DictReader(f)
         return list(reader)
+
 def generate_pdf_report(result):
     buffer = BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
@@ -467,6 +487,9 @@ def generate_pdf_report(result):
 
     def section_title(text):
         nonlocal y
+        if y < 30 * mm:
+            c.showPage()
+            y = height - margin
         c.setFillColorRGB(0.12, 0.36, 0.25)
         c.setFont("Helvetica-Bold", 13)
         c.drawString(margin, y, text)
@@ -474,6 +497,9 @@ def generate_pdf_report(result):
 
     def line(text, bold=False):
         nonlocal y
+        if y < 20 * mm:
+            c.showPage()
+            y = height - margin
         c.setFillColorRGB(0, 0, 0)
         c.setFont("Helvetica-Bold" if bold else "Helvetica", 10)
         c.drawString(margin, y, text)
@@ -482,14 +508,29 @@ def generate_pdf_report(result):
     section_title("Location")
     line(f"Address: {result.get('resolved_address', 'N/A')}")
     line(f"Coordinates: {result.get('latitude'):.5f}, {result.get('longitude'):.5f}")
+    line(f"Location matched via: {result.get('geocode_source', 'N/A')}")
     y -= 4 * mm
 
     section_title("Overall Risk Assessment")
     line(f"Overall Risk: {result.get('overall_label')} ({result.get('overall_percent')}%)", bold=True)
     line(f"Flood Exposure: {result.get('flood_risk')}")
     line(f"Terrain Risk: {result.get('terrain_risk')}")
-    line(f"Surroundings: {result.get('surroundings')}")
+    line(f"Surroundings (land cover): {result.get('surroundings')}")
+    line(f"Area character (business density): {result.get('area_character', 'N/A')}")
     line(f"Recommendation: {result.get('recommendation')}")
+    y -= 4 * mm
+
+    section_title("How the Score Was Calculated")
+    line("Flood and terrain are each scored Low=1, Medium=2, High=3.")
+    line(f"Flood score: {result.get('flood_risk')} -> {score_of(result.get('flood_risk', 'Low'))}")
+    line(f"Terrain score: {result.get('terrain_risk')} -> {score_of(result.get('terrain_risk', 'Low'))}")
+    line("Overall label = the higher of the two scores. Percent = average of the two, scaled to 100.")
+    line("This is a simple rule-based average, not a statistically calibrated probability of loss.")
+    y -= 4 * mm
+
+    section_title("Why Physical Inspection Was Recommended" if result.get("overall_score", 1) >= 2 else "Why Remote Screening Was Sufficient")
+    for trigger in result.get("inspection_triggers", []):
+        line(f"- {trigger}")
     y -= 4 * mm
 
     section_title("Recommended Actions")
@@ -497,14 +538,27 @@ def generate_pdf_report(result):
         line(f"- {action}")
     y -= 4 * mm
 
+    section_title("Property Imagery")
+    img_status = result.get("image_verification_status", "Unverified")
+    line(f"Verification status: {img_status}", bold=True)
+    line(f"Sentinel-2 satellite image date: {result.get('image_date', 'N/A')}")
+    if result.get("street_view_date"):
+        line(f"Street View capture date: {result.get('street_view_date')}")
+    elif result.get("street_view_checked"):
+        line("Street View: not available for this location")
+    line("Note: images are algorithmically retrieved by coordinate match and have not been")
+    line("manually confirmed against the actual insured building. Treat as UNVERIFIED unless")
+    line("cross-checked by an underwriter or inspector.")
+    y -= 4 * mm
+
     hazards = result.get("hazards")
     if hazards:
         section_title("Nearby Infrastructure")
         line(f"Filling stations within 200m: {hazards.get('filling_stations', 'N/A')}")
-        line(f"Hospitals within 200m: {hazards.get('hospitals', 'N/A')}")
-        line(f"Schools within 200m: {hazards.get('schools', 'N/A')}")
         line(f"Fire stations within 200m: {hazards.get('fire_stations', 'N/A')}")
-        line(f"Area character: {result.get('area_character', 'N/A')}")
+        line(f"Police stations within 1.5km: {hazards.get('police_stations', 'N/A')}")
+        line(f"Hospitals within 2km: {hazards.get('hospitals', 'N/A')}")
+        line(f"Schools within 1km: {hazards.get('schools', 'N/A')}")
         y -= 4 * mm
 
     weather = result.get("weather")
@@ -512,7 +566,6 @@ def generate_pdf_report(result):
         section_title("Weather at Time of Assessment")
         line(f"Condition: {weather.get('condition', 'N/A')}")
         line(f"Temperature: {weather.get('temperature_c', 'N/A')} °C")
-        line(f"Wind speed: {weather.get('windspeed_kmh', 'N/A')} km/h")
         y -= 4 * mm
 
     hist_weather = result.get("historical_weather")
@@ -527,19 +580,31 @@ def generate_pdf_report(result):
         section_title("Sum Insured Check")
         estimated_cost = result.get("estimated_built_sqm", 0) * result.get("cost_per_sqm", 0)
         line(f"Building type: {result.get('building_type')}")
-        line(f"Estimated built-up area: {result.get('estimated_built_sqm'):,.0f} sqm")
+        line(f"Estimated built-up area: {result.get('estimated_built_sqm'):,.0f} sqm (satellite footprint estimate)")
+        line(f"Cost benchmark used: N{result.get('cost_per_sqm', 0):,.0f}/sqm")
         line(f"Estimated replacement cost: N{estimated_cost:,.0f}")
         line(f"Declared value: N{result.get('declared_value'):,.0f}")
         y -= 4 * mm
 
+    section_title("Data Sources")
+    for label, source in DATA_SOURCES.items():
+        line(f"{label}: {source}")
+    y -= 4 * mm
+
+    section_title("Information That Could Not Be Verified")
+    for item in result.get("unverified_items", []):
+        line(f"- {item}")
+
     c.setFont("Helvetica-Oblique", 8)
     c.setFillColorRGB(0.4, 0.4, 0.4)
-    c.drawString(margin, margin, "Indicative screening report only — not a certified valuation or survey. Physical or drone inspection advised where flagged.")
+    if y < 20 * mm:
+        c.showPage()
+        y = height - margin
+    c.drawString(margin, margin, "Indicative screening report only — not a certified valuation or survey. Physical inspection advised where flagged.")
 
     c.save()
     buffer.seek(0)
     return buffer
-
 
 def run_assessment(latitude, longitude, resolved_address, api_key):
     point = ee.Geometry.Point([longitude, latitude])
@@ -550,7 +615,7 @@ def run_assessment(latitude, longitude, resolved_address, api_key):
     collection = (
         ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
         .filterBounds(area)
-        .filterDate('2026-01-01', '2026-09-04')
+        .filterDate('2026-01-01', '2026-09-13')
         .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 15))
         .sort('CLOUDY_PIXEL_PERCENTAGE')
     )
@@ -603,7 +668,9 @@ def run_assessment(latitude, longitude, resolved_address, api_key):
         50: "Built-up area", 60: "Bare/sparse vegetation",
         70: "Snow/ice", 80: "Water body", 90: "Wetland", 95: "Mangroves", 100: "Moss/lichen",
     }
-    surroundings = landcover_labels.get(landcover_code, "Unknown")
+    # Fixed: default to "Not classified" rather than "Unknown" to avoid reading as a contradiction
+    # against area_character, which is a separate signal (business density, not land cover).
+    surroundings = landcover_labels.get(landcover_code, "Not classified by land-cover model")
 
     built_mask = worldcover.eq(50)
     pixel_area = ee.Image.pixelArea()
@@ -639,23 +706,47 @@ def run_assessment(latitude, longitude, resolved_address, api_key):
     weather = get_weather(latitude, longitude)
     historical_weather = get_historical_weather_summary(latitude, longitude)
 
+    # Inspection trigger reasons — makes the recommendation explainable rather than a flat line
+    inspection_triggers = []
+    if flood_risk == "High":
+        inspection_triggers.append("High flood exposure (property within 100m of a known water body)")
+    elif flood_risk == "Medium":
+        inspection_triggers.append("Moderate flood exposure (property within 500m of a known water body)")
+    if terrain_risk.startswith("High"):
+        inspection_triggers.append("Steep terrain detected (average slope over 8 degrees)")
+    elif terrain_risk.startswith("Low"):
+        inspection_triggers.append("Very flat terrain, possible drainage/pooling concern")
+    if not inspection_triggers:
+        inspection_triggers.append("No location-based triggers found; recommendation is based on remote screening being sufficient at this stage")
+    inspection_triggers.append("Property image has not been manually verified against the actual building — treat imagery as unverified")
+
+    unverified_items = [
+        "Whether the displayed image is actually of the insured building (algorithmic coordinate match only)",
+        "Building type, occupancy/use, number of floors — not determinable from available imagery",
+        "Roof condition, structural cracks, or visible deterioration — not determinable from available imagery",
+        "Fire protection and security measures inside the property — require physical inspection",
+    ]
+
     return {
         "resolved_address": resolved_address, "image_date": image_date, "cloud_pct": cloud_pct,
         "flood_risk": flood_risk, "terrain_risk": terrain_risk, "surroundings": surroundings,
         "overall_label": overall_label, "overall_percent": overall_percent,
         "recommendation": recommendation, "actions": actions,
+        "inspection_triggers": inspection_triggers, "unverified_items": unverified_items,
         "best_image": best_image, "area": area, "latitude": latitude, "longitude": longitude,
         "estimated_built_sqm": estimated_built_sqm, "overall_score": overall_score,
         "hazards": hazards, "area_character": area_character,
         "weather": weather, "historical_weather": historical_weather,
     }
+
+
 # ============================== UI ==============================
 
 st.title("🛰️ RiskEye")
 st.caption("AI-assisted property risk screening using satellite imagery")
 
 st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-st.markdown("### 📍 Property Location")
+st.markdown("### Property Location")
 address = st.text_input("Property address", placeholder="e.g. Wuye, Abuja, Nigeria", label_visibility="collapsed")
 
 with st.expander("Enter coordinates manually instead"):
@@ -666,7 +757,7 @@ with st.expander("Enter coordinates manually instead"):
         manual_lon = st.text_input("Longitude")
 
 st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-st.markdown("###  Sum Insured Check (optional)")
+st.markdown("### Sum Insured Check (optional)")
 st.caption("Select the building type and enter the declared value to check for possible underinsurance. This is an indicative estimate, not a certified valuation.")
 
 col3, col4, col5 = st.columns(3)
@@ -679,7 +770,7 @@ with col5:
     cost_per_sqm = st.number_input("Cost benchmark (₦/sqm)", min_value=0, step=10000, value=default_cost)
 
 st.write("")
-run_clicked = st.button(" Run Risk Assessment", type="primary", use_container_width=False)
+run_clicked = st.button("Run Risk Assessment", type="primary", use_container_width=False)
 
 if run_clicked:
     st.session_state.result = None
@@ -708,6 +799,7 @@ if run_clicked:
             result["cost_per_sqm"] = cost_per_sqm
             result["building_type"] = building_type
             result["geocode_source"] = geocode_source
+            result["image_verification_status"] = "UNVERIFIED"
             st.session_state.result = result
             log_assessment(result)
 
@@ -716,7 +808,7 @@ if "result" in st.session_state and st.session_state.result:
     risk_color = {"LOW": "green", "MEDIUM": "orange", "HIGH": "red"}[result["overall_label"]]
 
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-    st.markdown("## 📋 Assessment Result")
+    st.markdown("## Assessment Result")
 
     top_col1, top_col2 = st.columns([2.5, 1])
     with top_col1:
@@ -731,7 +823,7 @@ if "result" in st.session_state and st.session_state.result:
 
     pdf_buffer = generate_pdf_report(result)
     st.download_button(
-        "📄 Download PDF Report",
+        "Download PDF Report",
         data=pdf_buffer,
         file_name=f"RiskEye_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
         mime="application/pdf",
@@ -741,17 +833,26 @@ if "result" in st.session_state and st.session_state.result:
     c1, c2, c3 = st.columns(3)
     c1.metric("Flood Exposure", result["flood_risk"])
     c2.metric("Terrain Risk", result["terrain_risk"])
-    c3.metric("Surroundings", result["surroundings"])
+    c3.metric("Surroundings (land cover)", result["surroundings"])
 
     st.info(f"**Recommendation:** {result['recommendation']}")
 
-    st.markdown("####  Recommended Actions")
+    with st.expander("Why was this recommended? (scoring breakdown)"):
+        st.write(f"Flood score: **{result['flood_risk']}** → {score_of(result['flood_risk'])}/3")
+        st.write(f"Terrain score: **{result['terrain_risk']}** → {score_of(result['terrain_risk'])}/3")
+        st.write(f"Overall label uses the higher of the two scores. Percent is the average of both, scaled to 100.")
+        st.caption("This is a simple, transparent rule-based average — not a statistically calibrated probability of loss.")
+        st.write("**Specific triggers behind this recommendation:**")
+        for trigger in result["inspection_triggers"]:
+            st.markdown(f"- {trigger}")
+
+    st.markdown("#### Recommended Actions")
     st.caption("Based on location risk factors only — building-specific issues (roof, wiring, structure) require a physical or drone inspection.")
     for action in result["actions"]:
         st.markdown(f"- {action}")
 
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-    st.markdown("### 📰 Recent Nigerian News Mentioning This Area")
+    st.markdown("### Recent Nigerian News Mentioning This Area")
     st.caption(
         "Headline-level matches from Nigerian news sources — not confirmed, property-specific "
         "findings. Always verify relevance before treating as fact."
@@ -766,45 +867,47 @@ if "result" in st.session_state and st.session_state.result:
         st.caption(f"Matched on locality: **{incidents[0]['matched_on']}**")
         for item in incidents:
             with st.container():
-                st.markdown(f"**🔗 [{item['title']}]({item['link']})** \n*{item['date']}*")
-                st.write(
-                    f"<span style='color:#555;font-size:0.9rem;'>{item['snippet']}</span>",
-                    unsafe_allow_html=True
-                )
+                st.markdown(f"**[{item['title']}]({item['link']})**")
+                st.caption(f"Source: {item['link'].split('/')[2] if '/' in item['link'] else 'N/A'} • {item['date']}")
+                st.write(item['snippet'])
                 st.divider()
     else:
         st.info("No area-specific flood, fire, collapse, or security incidents found in headlines for this locality in the last year.")
 
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-    st.markdown("###  Nearby Infrastructure")
+    st.markdown("### Nearby Infrastructure")
     hazards = result.get("hazards", {})
-    h1, h2, h3, h4 = st.columns(4)
+    h1, h2, h3, h4, h5 = st.columns(5)
 
     fs, fs_err = hazards.get("filling_stations"), hazards.get("filling_stations_error")
     hs, hs_err = hazards.get("hospitals"), hazards.get("hospitals_error")
     sc, sc_err = hazards.get("schools"), hazards.get("schools_error")
     fr, fr_err = hazards.get("fire_stations"), hazards.get("fire_stations_error")
+    pol, pol_err = hazards.get("police_stations"), hazards.get("police_stations_error")
 
     h1.metric("Filling stations (200m)", fs if fs is not None else "N/A")
-    h2.metric("Hospitals (200m)", hs if hs is not None else "N/A")
-    h3.metric("Schools (200m)", sc if sc is not None else "N/A")
-    h4.metric("Fire stations (200m)", fr if fr is not None else "N/A")
-    st.caption("All nearby counts use a 200m radius. A result of 0 does not necessarily mean no wider coverage exists nearby.")
+    h2.metric("Fire stations (200m)", fr if fr is not None else "N/A")
+    h3.metric("Police (1.5km)", pol if pol is not None else "N/A")
+    h4.metric("Hospitals (2km)", hs if hs is not None else "N/A")
+    h5.metric("Schools (1km)", sc if sc is not None else "N/A")
+    st.caption("Filling station and fire station counts use a tight 200m radius — a result of 0 is common and does not necessarily mean no coverage exists nearby.")
 
     st.write("")
-    st.metric("Area character (inferred)", result.get("area_character", "Unknown"))
+    st.metric("Area character (inferred from business density)", result.get("area_character", "Unknown"))
     st.caption(
-        "Area character is inferred from nearby business density (via Google Places) — it is NOT "
-        "computer-vision detection of building types. RiskEye cannot currently look at a building and "
-        "determine if it is commercial or residential; this is a contextual estimate only."
+        "This is separate from the 'Surroundings (land cover)' metric above: land cover comes from "
+        "satellite classification (vegetation, built-up, water, etc.), while area character is inferred "
+        "from nearby business density via Google Places. They measure different things and may not always "
+        "align. Neither is computer-vision detection of building types — RiskEye cannot currently look at "
+        "a building and determine if it is commercial or residential."
     )
 
-    if fs_err or hs_err or sc_err or fr_err:
-        st.caption(f"⚠️ Some lookups had issues: {fs_err or ''} {hs_err or ''} {sc_err or ''} {fr_err or ''}".strip())
+    if fs_err or hs_err or sc_err or fr_err or pol_err:
+        st.caption(f"⚠️ Some lookups had issues: {fs_err or ''} {hs_err or ''} {sc_err or ''} {fr_err or ''} {pol_err or ''}".strip())
     st.caption("Counts from Google Places (within radius shown). Coverage is generally strong in major Nigerian cities.")
 
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-    st.markdown("###  Weather Conditions")
+    st.markdown("### Weather Conditions")
     weather = result.get("weather")
     hist_weather = result.get("historical_weather")
 
@@ -830,7 +933,12 @@ if "result" in st.session_state and st.session_state.result:
     st.caption("Historical data reflects the last 12 months — a recent pattern, not a multi-year climate record.")
 
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-    st.markdown("### 🔎 Close-Up View")
+    st.markdown("### Close-Up View")
+    st.warning(
+        "⚠️ **UNVERIFIED IMAGERY** — this image is retrieved automatically by coordinate match. "
+        "It has not been manually confirmed to show the actual insured building. Treat as indicative "
+        "only until verified by an underwriter or inspector."
+    )
     if result.get("overall_score", 1) >= 2:
         if "gcp_static_maps" in st.secrets:
             api_key = st.secrets["gcp_static_maps"]["api_key"]
@@ -843,24 +951,27 @@ if "result" in st.session_state and st.session_state.result:
             )
 
             if view_mode == "Interactive (pan/zoom)":
-                st.caption("Interactive Google satellite map — you can pan and zoom directly.")
+                st.caption("Interactive Google satellite map — you can pan and zoom directly. Imagery date varies by tile and is not individually reported by Google's basemap service.")
                 render_interactive_google_map(result["latitude"], result["longitude"], api_key)
             elif view_mode == "Static image":
-                st.caption("Sharper close-up shown because this property is flagged Medium/High risk.")
+                st.caption("Sharper close-up shown because this property is flagged Medium/High risk. Google's Static Maps basemap does not report a per-image capture date.")
                 image_bytes = get_static_map_image(result["latitude"], result["longitude"], api_key)
                 if image_bytes:
-                    st.image(image_bytes, caption="Google satellite close-up (single image, not interactive)")
+                    st.image(image_bytes, caption="Google satellite close-up (single image, not interactive) — UNVERIFIED")
                 else:
                     st.caption("Close-up image could not be retrieved for this location.")
             elif view_mode == "Street View (if available)":
-                image_bytes, sv_status = get_street_view_image(result["latitude"], result["longitude"], api_key)
+                image_bytes, sv_status, sv_date = get_street_view_image(result["latitude"], result["longitude"], api_key)
+                result["street_view_checked"] = True
                 if image_bytes:
-                    st.image(image_bytes, caption="Google Street View (ground-level)")
+                    result["street_view_date"] = sv_date
+                    date_label = f"Captured: {sv_date}" if sv_date else "Capture date not reported"
+                    st.image(image_bytes, caption=f"Google Street View (ground-level) — UNVERIFIED — {date_label}")
                 else:
                     st.warning(
                         f"No Street View imagery available for this location (status: {sv_status}). "
                         "This is common outside major Nigerian city centers, since Google's Street View "
-                        "cars have limited coverage in Nigeria."
+                        "cars have limited coverage in Nigeria. This limitation is noted in the PDF report."
                     )
         else:
             st.caption("Close-up imagery is not configured for this deployment.")
@@ -869,7 +980,7 @@ if "result" in st.session_state and st.session_state.result:
 
     if result.get("declared_value", 0) > 0:
         st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-        st.markdown("###  Sum Insured Check")
+        st.markdown("### Sum Insured Check")
 
         estimated_sqm = result["estimated_built_sqm"]
         estimated_cost = estimated_sqm * result["cost_per_sqm"]
@@ -903,8 +1014,8 @@ if "result" in st.session_state and st.session_state.result:
         )
 
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-    st.markdown("### 🛰️ Satellite View (Sentinel-2)")
-    st.caption("Zoom using the + / − controls on the map, or scroll while hovering over it. Sentinel-2 imagery has ~10m resolution, so individual buildings will appear blocky rather than sharp.")
+    st.markdown("### Satellite View (Sentinel-2)")
+    st.caption(f"Image date: {result['image_date']} — Zoom using the + / − controls, or scroll while hovering. Sentinel-2 imagery has ~10m resolution, so individual buildings will appear blocky rather than sharp.")
 
     m = folium.Map(location=[result["latitude"], result["longitude"]], zoom_start=17, max_zoom=20)
     map_id_dict = ee.Image(result["best_image"]).getMapId(
@@ -920,11 +1031,20 @@ if "result" in st.session_state and st.session_state.result:
     ).add_to(m)
     st_folium(m, height=550, width=None)
 
+    st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
+    with st.expander("Data Sources — where each figure comes from"):
+        for label, source in DATA_SOURCES.items():
+            st.markdown(f"**{label}:** {source}")
+
+    with st.expander("Information that could not be verified for this property"):
+        for item in result["unverified_items"]:
+            st.markdown(f"- {item}")
+
 st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-st.markdown("### 📚 Assessment History")
+st.markdown("### Assessment History")
 st.caption("⚠️ History is stored temporarily on the app server and may be cleared when the app restarts. This is a lightweight log for demonstration, not permanent storage.")
 history = load_history()
 if history:
     st.dataframe(history, use_container_width=True)
-else: 
+else:
     st.caption("No assessments logged yet.")
