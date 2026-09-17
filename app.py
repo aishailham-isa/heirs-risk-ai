@@ -219,11 +219,11 @@ def get_nearby_places_count(lat, lon, radius_m, place_type, api_key):
         return None, str(e)[:80]
 def get_nearby_hazards(lat, lon, api_key):
     fuel_count, fuel_err = get_nearby_places_count(lat, lon, 200, "gas_station", api_key)
-    hosp_count, hosp_err = get_nearby_places_count(lat, lon, 2000, "hospital", api_key)
-    school_count, school_err = get_nearby_places_count(lat, lon, 1000, "school", api_key)
+    hosp_count, hosp_err = get_nearby_places_count(lat, lon, 200, "hospital", api_key)
+    school_count, school_err = get_nearby_places_count(lat, lon, 200, "school", api_key)
     fire_count, fire_err = get_nearby_places_count(lat, lon, 200, "fire_station", api_key)
-    police_count, police_err = get_nearby_places_count(lat, lon, 1500, "police", api_key)
-    commercial_count, commercial_err = get_nearby_places_count(lat, lon, 500, "store", api_key)
+    police_count, police_err = get_nearby_places_count(lat, lon, 200, "police", api_key)
+    commercial_count, commercial_err = get_nearby_places_count(lat, lon, 200, "store", api_key)
     return {
         "filling_stations": fuel_count, "filling_stations_error": fuel_err,
         "hospitals": hosp_count, "hospitals_error": hosp_err,
@@ -556,9 +556,9 @@ def generate_pdf_report(result):
         section_title("Nearby Infrastructure")
         line(f"Filling stations within 200m: {hazards.get('filling_stations', 'N/A')}")
         line(f"Fire stations within 200m: {hazards.get('fire_stations', 'N/A')}")
-        line(f"Police stations within 1.5km: {hazards.get('police_stations', 'N/A')}")
-        line(f"Hospitals within 2km: {hazards.get('hospitals', 'N/A')}")
-        line(f"Schools within 1km: {hazards.get('schools', 'N/A')}")
+        line(f"Police stations within 200m: {hazards.get('police_stations', 'N/A')}")
+        line(f"Hospitals within 200m: {hazards.get('hospitals', 'N/A')}")
+        line(f"Schools within 200m: {hazards.get('schools', 'N/A')}")
         y -= 4 * mm
 
     weather = result.get("weather")
@@ -887,10 +887,13 @@ if "result" in st.session_state and st.session_state.result:
 
     h1.metric("Filling stations (200m)", fs if fs is not None else "N/A")
     h2.metric("Fire stations (200m)", fr if fr is not None else "N/A")
-    h3.metric("Police (1.5km)", pol if pol is not None else "N/A")
-    h4.metric("Hospitals (2km)", hs if hs is not None else "N/A")
-    h5.metric("Schools (1km)", sc if sc is not None else "N/A")
-    st.caption("Filling station and fire station counts use a tight 200m radius — a result of 0 is common and does not necessarily mean no coverage exists nearby.")
+    h3.metric("Police stations (200m)", pol if pol is not None else "N/A")
+    h4.metric("Hospitals (200m)", hs if hs is not None else "N/A")
+    h5.metric("Schools (200m)", sc if sc is not None else "N/A")
+    st.caption(
+        "Infrastructure radius lookup: all facilities are checked within 200m for this screen. "
+        "A result of 0 does not necessarily mean no nearby coverage exists."
+    )
 
     st.write("")
     st.metric("Area character (inferred from business density)", result.get("area_character", "Unknown"))
