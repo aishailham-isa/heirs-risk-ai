@@ -13,6 +13,7 @@ from streamlit_folium import st_folium
 from geopy.geocoders import Nominatim
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
+from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
 st.set_page_config(page_title="RiskEye", page_icon="🛰️", layout="wide")
@@ -470,6 +471,33 @@ def generate_pdf_report(result):
     margin = 20 * mm
     y = height - margin
 
+    def draw_embedded_image(image_bytes, title, caption=None, max_width=150 * mm, max_height=80 * mm):
+        nonlocal y
+        if not image_bytes:
+            return
+        try:
+            img = ImageReader(BytesIO(image_bytes))
+            iw, ih = img.getSize()
+            ratio = min(max_width / iw, max_height / ih)
+            w = iw * ratio
+            h = ih * ratio
+            if y - h < 30 * mm:
+                c.showPage()
+                y = height - margin
+            c.setFillColorRGB(0, 0, 0)
+            c.setFont("Helvetica-Bold", 10)
+            c.drawString(margin, y, title)
+            y -= 5 * mm
+            c.drawImage(img, margin, y - h, width=w, height=h)
+            y -= h + 8 * mm
+            if caption:
+                c.setFillColorRGB(0.2, 0.2, 0.2)
+                c.setFont("Helvetica", 8)
+                c.drawString(margin, y, caption)
+                y -= 6 * mm
+        except Exception:
+            pass
+
     c.setFillColorRGB(0.12, 0.36, 0.25)
     c.setFont("Helvetica-Bold", 20)
     c.drawString(margin, y, "RiskEye — Property Risk Report")
@@ -545,11 +573,26 @@ def generate_pdf_report(result):
     if result.get("street_view_date"):
         line(f"Street View capture date: {result.get('street_view_date')}")
     elif result.get("street_view_checked"):
-        line("Street View: not available for this location")
+        line("Street View: capture date not provided by this data source")
+    if result.get("static_map_capture_date"):
+        line(f"Static map capture date: {result.get('static_map_capture_date')}")
     line("Note: images are algorithmically retrieved by coordinate match and have not been")
     line("manually confirmed against the actual insured building. Treat as UNVERIFIED unless")
     line("cross-checked by an underwriter or inspector.")
     y -= 4 * mm
+
+    if result.get("street_view_image_bytes"):
+        draw_embedded_image(
+            result["street_view_image_bytes"],
+            "Street View image",
+            f"Captured: {result.get('street_view_date') or 'Capture date not provided by this data source'}"
+        )
+    elif result.get("static_image_bytes"):
+        draw_embedded_image(
+            result["static_image_bytes"],
+            "Static map image",
+            "Capture date not provided by this data source"
+        )
 
     hazards = result.get("hazards")
     if hazards:
@@ -821,14 +864,6 @@ if "result" in st.session_state and st.session_state.result:
     with top_col2:
         st.markdown(f"#### Risk: :{risk_color}[{result['overall_label']} ({result['overall_percent']}%)]")
 
-    pdf_buffer = generate_pdf_report(result)
-    st.download_button(
-        "Download PDF Report",
-        data=pdf_buffer,
-        file_name=f"RiskEye_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-        mime="application/pdf",
-    )
-
     st.write("")
     c1, c2, c3 = st.columns(3)
     c1.metric("Flood Exposure", result["flood_risk"])
@@ -957,18 +992,21 @@ if "result" in st.session_state and st.session_state.result:
                 st.caption("Interactive Google satellite map — you can pan and zoom directly. Imagery date varies by tile and is not individually reported by Google's basemap service.")
                 render_interactive_google_map(result["latitude"], result["longitude"], api_key)
             elif view_mode == "Static image":
-                st.caption("Sharper close-up shown because this property is flagged Medium/High risk. Google's Static Maps basemap does not report a per-image capture date.")
+                st.caption("Sharper close-up shown because this property is flagged Medium/High risk. Capture date not provided by this data source.")
                 image_bytes = get_static_map_image(result["latitude"], result["longitude"], api_key)
                 if image_bytes:
-                    st.image(image_bytes, caption="Google satellite close-up (single image, not interactive) — UNVERIFIED")
+                    result["static_image_bytes"] = image_bytes
+                    result["static_map_capture_date"] = "Capture date not provided by this data source"
+                    st.image(image_bytes, caption="Google satellite close-up (single image, not interactive) — UNVERIFIED — Capture date not provided by this data source")
                 else:
                     st.caption("Close-up image could not be retrieved for this location.")
             elif view_mode == "Street View (if available)":
                 image_bytes, sv_status, sv_date = get_street_view_image(result["latitude"], result["longitude"], api_key)
                 result["street_view_checked"] = True
                 if image_bytes:
+                    result["street_view_image_bytes"] = image_bytes
                     result["street_view_date"] = sv_date
-                    date_label = f"Captured: {sv_date}" if sv_date else "Capture date not reported"
+                    date_label = f"Captured: {sv_date}" if sv_date else "Capture date not provided by this data source"
                     st.image(image_bytes, caption=f"Google Street View (ground-level) — UNVERIFIED — {date_label}")
                 else:
                     st.warning(
@@ -980,6 +1018,14 @@ if "result" in st.session_state and st.session_state.result:
             st.caption("Close-up imagery is not configured for this deployment.")
     else:
         st.caption("Close-up image is only shown for properties flagged Medium or High risk (this one is Low).")
+
+    pdf_buffer = generate_pdf_report(result)
+    st.download_button(
+        "Download PDF Report",
+        data=pdf_buffer,
+        file_name=f"RiskEye_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+        mime="application/pdf",
+    )
 
     if result.get("declared_value", 0) > 0:
         st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
