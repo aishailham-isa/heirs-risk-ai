@@ -1094,7 +1094,7 @@ if "result" in st.session_state and st.session_state.result:
             "combined with a general construction cost benchmark for the selected building type. "
             "Not a certified valuation."
         )
-st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
     st.markdown("### Satellite View (Sentinel-2)")
     st.caption(f"Image date: {result['image_date']} — ~10m resolution, so individual buildings appear blocky rather than sharp.")
 
