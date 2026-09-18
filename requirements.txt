@@ -5,3 +5,4 @@ streamlit-folium
 folium
 geopy
 reportlab
+pillow
