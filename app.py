@@ -13,8 +13,9 @@ from streamlit_folium import st_folium
 from geopy.geocoders import Nominatim
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
-from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
+from reportlab.lib.utils import ImageReader
+from PIL import Image as PILImage
 
 st.set_page_config(page_title="RiskEye", page_icon="🛰️", layout="wide")
 
@@ -109,6 +110,14 @@ def geocode_with_google(address, api_key):
     return None, None, None
 
 
+def address_looks_truncated(original_input, resolved_address):
+    """Rough check: if the input had a house number that's missing from the resolved
+    address, flag it — geocoders sometimes drop specific building numbers for landmark streets."""
+    input_has_number = bool(re.search(r'\b\d{1,5}[A-Za-z]?\b', original_input))
+    resolved_has_number = bool(re.search(r'\b\d{1,5}[A-Za-z]?\b', resolved_address))
+    return input_has_number and not resolved_has_number
+
+
 def geocode_address(address):
     geolocator = Nominatim(user_agent="riskeye-app")
 
@@ -155,7 +164,6 @@ def get_static_map_image(lat, lon, api_key):
 
 
 def get_street_view_image(lat, lon, api_key):
-    """Returns (image_bytes, status, capture_date). capture_date is 'YYYY-MM' if provided by Google, else None."""
     metadata_url = "https://maps.googleapis.com/maps/api/streetview/metadata"
     params = {"location": f"{lat},{lon}", "key": api_key}
     try:
@@ -175,28 +183,6 @@ def get_street_view_image(lat, lon, api_key):
     if image_response.status_code == 200:
         return image_response.content, "OK", capture_date
     return None, "FETCH_FAILED", None
-
-
-def populate_report_images(result, api_key=None):
-    if not api_key:
-        return result
-
-    if not result.get("street_view_image_bytes"):
-        image_bytes, sv_status, sv_date = get_street_view_image(result["latitude"], result["longitude"], api_key)
-        result["street_view_checked"] = True
-        if image_bytes:
-            result["street_view_image_bytes"] = image_bytes
-            result["street_view_date"] = sv_date
-        elif sv_status:
-            result["street_view_status"] = sv_status
-
-    if not result.get("static_image_bytes") and not result.get("street_view_image_bytes"):
-        image_bytes = get_static_map_image(result["latitude"], result["longitude"], api_key)
-        if image_bytes:
-            result["static_image_bytes"] = image_bytes
-            result["static_map_capture_date"] = "Capture date not provided by this data source"
-
-    return result
 
 
 def render_interactive_google_map(lat, lon, api_key, height=550):
@@ -240,13 +226,17 @@ def get_nearby_places_count(lat, lon, radius_m, place_type, api_key):
             return None, status
     except Exception as e:
         return None, str(e)[:80]
+
+
 def get_nearby_hazards(lat, lon, api_key):
+    # All standardized to 200m per latest instruction. Hospitals/schools are naturally
+    # sparser than fire/filling stations, so 0 is expected far more often at this radius.
     fuel_count, fuel_err = get_nearby_places_count(lat, lon, 200, "gas_station", api_key)
     hosp_count, hosp_err = get_nearby_places_count(lat, lon, 200, "hospital", api_key)
     school_count, school_err = get_nearby_places_count(lat, lon, 200, "school", api_key)
     fire_count, fire_err = get_nearby_places_count(lat, lon, 200, "fire_station", api_key)
     police_count, police_err = get_nearby_places_count(lat, lon, 200, "police", api_key)
-    commercial_count, commercial_err = get_nearby_places_count(lat, lon, 200, "store", api_key)
+    commercial_count, commercial_err = get_nearby_places_count(lat, lon, 500, "store", api_key)
     return {
         "filling_stations": fuel_count, "filling_stations_error": fuel_err,
         "hospitals": hosp_count, "hospitals_error": hosp_err,
@@ -297,6 +287,35 @@ def extract_search_locality(resolved_address: str) -> str:
         selected_area = parts[0] if parts else "Lagos"
 
     return selected_area.strip()
+
+
+def clean_news_snippet(raw_text: str) -> str:
+    """Stricter cleanup: strips menu/nav junk, stray bold-looking fragments, and
+    truncates safely at a sentence boundary rather than mid-word."""
+    text = raw_text.strip()
+
+    junk_patterns = [
+        r"^(PunchNG Menu:|Photo:.*?:|By .*?:|search button)\s*",
+        r"^(Home\s*[\|>]\s*)+",
+        r"(Advertisement|ADVERTISEMENT)\s*",
+        r"Read Also:.*?(?=\.|$)",
+        r"Share this:.*$",
+        r"Related Posts?:.*$",
+    ]
+    for pattern in junk_patterns:
+        text = re.sub(pattern, "", text, flags=re.I).strip()
+
+    text = re.sub(r"\s{2,}", " ", text)
+
+    if len(text) > 220:
+        truncated = text[:220]
+        last_period = truncated.rfind(". ")
+        if last_period > 100:
+            text = truncated[:last_period + 1]
+        else:
+            text = truncated.rsplit(" ", 1)[0] + "..."
+
+    return text.strip()
 
 
 def fetch_area_news(resolved_address: str, num_results: int = 5):
@@ -359,12 +378,12 @@ def fetch_area_news(resolved_address: str, num_results: int = 5):
                 match = re.search(r"([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})", content)
                 date_str = match.group(1) if match else "Recent"
 
-            clean_body = re.sub(r"^(PunchNG Menu:|Photo:.*?|By .*?:|search button)\s*", "", content, flags=re.I).strip()
-            if len(clean_body) > 220:
-                clean_body = clean_body[:220].rsplit(" ", 1)[0] + "..."
+            clean_body = clean_news_snippet(content)
+            if len(clean_body) < 40:
+                continue
 
             incidents.append({
-                "title": title,
+                "title": title.strip(),
                 "snippet": clean_body,
                 "link": link,
                 "date": date_str,
@@ -493,40 +512,6 @@ def generate_pdf_report(result):
     margin = 20 * mm
     y = height - margin
 
-    def draw_embedded_image(image_bytes, title, caption=None, max_width=150 * mm, max_height=80 * mm):
-        nonlocal y
-        if not image_bytes:
-            return
-        try:
-            img = ImageReader(BytesIO(image_bytes))
-            iw, ih = img.getSize()
-            if iw <= 0 or ih <= 0:
-                return
-            ratio = min(max_width / iw, max_height / ih)
-            w = iw * ratio
-            h = ih * ratio
-            if y - h < 30 * mm:
-                c.showPage()
-                y = height - margin
-            c.setFillColorRGB(0, 0, 0)
-            c.setFont("Helvetica-Bold", 10)
-            c.drawString(margin, y, title)
-            y -= 5 * mm
-            image_y = y - h
-            if image_y < 20 * mm:
-                c.showPage()
-                y = height - margin
-                image_y = y - h
-            c.drawImage(img, margin, image_y, width=w, height=h)
-            y = image_y - 8 * mm
-            if caption:
-                c.setFillColorRGB(0.2, 0.2, 0.2)
-                c.setFont("Helvetica", 8)
-                c.drawString(margin, y, caption)
-                y -= 6 * mm
-        except Exception:
-            pass
-
     c.setFillColorRGB(0.12, 0.36, 0.25)
     c.setFont("Helvetica-Bold", 20)
     c.drawString(margin, y, "RiskEye — Property Risk Report")
@@ -564,6 +549,9 @@ def generate_pdf_report(result):
 
     section_title("Location")
     line(f"Address: {result.get('resolved_address', 'N/A')}")
+    if result.get("address_possibly_truncated"):
+        line("NOTE: the matched address appears less specific than the input given —", bold=True)
+        line("the house/building number may have been dropped during geocoding. Verify manually.")
     line(f"Coordinates: {result.get('latitude'):.5f}, {result.get('longitude'):.5f}")
     line(f"Location matched via: {result.get('geocode_source', 'N/A')}")
     y -= 4 * mm
@@ -585,7 +573,7 @@ def generate_pdf_report(result):
     line("This is a simple rule-based average, not a statistically calibrated probability of loss.")
     y -= 4 * mm
 
-    section_title("Why Physical Inspection Was Recommended" if result.get("overall_score", 1) >= 2 else "Why Remote Screening Was Sufficient")
+    section_title("Why This Recommendation Was Made")
     for trigger in result.get("inspection_triggers", []):
         line(f"- {trigger}")
     y -= 4 * mm
@@ -595,42 +583,54 @@ def generate_pdf_report(result):
         line(f"- {action}")
     y -= 4 * mm
 
-    section_title("Property Imagery")
-    img_status = result.get("image_verification_status", "Unverified")
+    # --- Embed the actual property image, if one was captured during viewing ---
+    section_title("Property Image")
+    img_status = result.get("image_verification_status", "UNVERIFIED")
     line(f"Verification status: {img_status}", bold=True)
     line(f"Sentinel-2 satellite image date: {result.get('image_date', 'N/A')}")
-    if result.get("street_view_date"):
-        line(f"Street View capture date: {result.get('street_view_date')}")
-    elif result.get("street_view_checked"):
-        line("Street View: capture date not provided by this data source")
-    if result.get("static_map_capture_date"):
-        line(f"Static map capture date: {result.get('static_map_capture_date')}")
+
+    embedded_bytes = result.get("embedded_image_bytes")
+    embedded_source = result.get("embedded_image_source")
+    embedded_date = result.get("embedded_image_date")
+
+    if embedded_bytes:
+        try:
+            if y < 90 * mm:
+                c.showPage()
+                y = height - margin
+            pil_img = PILImage.open(BytesIO(embedded_bytes))
+            img_reader = ImageReader(pil_img)
+            img_w = 120 * mm
+            img_h = img_w * pil_img.height / pil_img.width
+            c.drawImage(img_reader, margin, y - img_h, width=img_w, height=img_h)
+            y -= (img_h + 6 * mm)
+            caption = f"Source: {embedded_source or 'N/A'}"
+            if embedded_date:
+                caption += f" • Captured: {embedded_date}"
+            else:
+                caption += " • Capture date not provided by this data source"
+            line(caption)
+        except Exception:
+            line("(Image could not be embedded due to a formatting issue.)")
+    else:
+        line("No close-up image was viewed during this session, so none is embedded here.")
+        line("Open the 'Close-Up View' section in the app and select a view mode before")
+        line("downloading the report, to include an image.")
+    y -= 4 * mm
+
     line("Note: images are algorithmically retrieved by coordinate match and have not been")
     line("manually confirmed against the actual insured building. Treat as UNVERIFIED unless")
     line("cross-checked by an underwriter or inspector.")
     y -= 4 * mm
 
-    if result.get("street_view_image_bytes"):
-        draw_embedded_image(
-            result["street_view_image_bytes"],
-            "Street View image",
-            f"Captured: {result.get('street_view_date') or 'Capture date not provided by this data source'}"
-        )
-    elif result.get("static_image_bytes"):
-        draw_embedded_image(
-            result["static_image_bytes"],
-            "Static map image",
-            "Capture date not provided by this data source"
-        )
-
     hazards = result.get("hazards")
     if hazards:
-        section_title("Nearby Infrastructure")
-        line(f"Filling stations within 200m: {hazards.get('filling_stations', 'N/A')}")
-        line(f"Fire stations within 200m: {hazards.get('fire_stations', 'N/A')}")
-        line(f"Police stations within 200m: {hazards.get('police_stations', 'N/A')}")
-        line(f"Hospitals within 200m: {hazards.get('hospitals', 'N/A')}")
-        line(f"Schools within 200m: {hazards.get('schools', 'N/A')}")
+        section_title("Nearby Infrastructure (200m radius unless noted)")
+        line(f"Filling stations: {hazards.get('filling_stations', 'N/A')}")
+        line(f"Fire stations: {hazards.get('fire_stations', 'N/A')}")
+        line(f"Police stations: {hazards.get('police_stations', 'N/A')}")
+        line(f"Hospitals: {hazards.get('hospitals', 'N/A')} (sparse facility — 0 is common even where coverage exists nearby)")
+        line(f"Schools: {hazards.get('schools', 'N/A')} (sparse facility — 0 is common even where coverage exists nearby)")
         y -= 4 * mm
 
     weather = result.get("weather")
@@ -678,7 +678,8 @@ def generate_pdf_report(result):
     buffer.seek(0)
     return buffer
 
-def run_assessment(latitude, longitude, resolved_address, api_key):
+
+def run_assessment(latitude, longitude, resolved_address, api_key, original_input=""):
     point = ee.Geometry.Point([longitude, latitude])
     area = point.buffer(500)
     search_area = point.buffer(1000)
@@ -687,7 +688,7 @@ def run_assessment(latitude, longitude, resolved_address, api_key):
     collection = (
         ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
         .filterBounds(area)
-        .filterDate('2026-01-01', '2026-09-13')
+        .filterDate('2026-01-01', '2026-09-11')
         .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 15))
         .sort('CLOUDY_PIXEL_PERCENTAGE')
     )
@@ -740,8 +741,6 @@ def run_assessment(latitude, longitude, resolved_address, api_key):
         50: "Built-up area", 60: "Bare/sparse vegetation",
         70: "Snow/ice", 80: "Water body", 90: "Wetland", 95: "Mangroves", 100: "Moss/lichen",
     }
-    # Fixed: default to "Not classified" rather than "Unknown" to avoid reading as a contradiction
-    # against area_character, which is a separate signal (business density, not land cover).
     surroundings = landcover_labels.get(landcover_code, "Not classified by land-cover model")
 
     built_mask = worldcover.eq(50)
@@ -778,7 +777,6 @@ def run_assessment(latitude, longitude, resolved_address, api_key):
     weather = get_weather(latitude, longitude)
     historical_weather = get_historical_weather_summary(latitude, longitude)
 
-    # Inspection trigger reasons — makes the recommendation explainable rather than a flat line
     inspection_triggers = []
     if flood_risk == "High":
         inspection_triggers.append("High flood exposure (property within 100m of a known water body)")
@@ -799,6 +797,8 @@ def run_assessment(latitude, longitude, resolved_address, api_key):
         "Fire protection and security measures inside the property — require physical inspection",
     ]
 
+    address_possibly_truncated = address_looks_truncated(original_input, resolved_address) if original_input else False
+
     return {
         "resolved_address": resolved_address, "image_date": image_date, "cloud_pct": cloud_pct,
         "flood_risk": flood_risk, "terrain_risk": terrain_risk, "surroundings": surroundings,
@@ -809,9 +809,8 @@ def run_assessment(latitude, longitude, resolved_address, api_key):
         "estimated_built_sqm": estimated_built_sqm, "overall_score": overall_score,
         "hazards": hazards, "area_character": area_character,
         "weather": weather, "historical_weather": historical_weather,
+        "address_possibly_truncated": address_possibly_truncated,
     }
-
-
 # ============================== UI ==============================
 
 st.title("🛰️ RiskEye")
@@ -850,9 +849,11 @@ if run_clicked:
     if manual_lat and manual_lon:
         latitude, longitude, resolved_address = float(manual_lat), float(manual_lon), "Manually entered coordinates"
         geocode_source = "manual entry"
+        original_input = ""
     elif address:
         with st.spinner("Looking up address..."):
             latitude, longitude, resolved_address, geocode_source = geocode_address(address)
+        original_input = address
     else:
         st.warning("Please enter an address or coordinates.")
         st.stop()
@@ -862,7 +863,7 @@ if run_clicked:
     else:
         places_api_key = st.secrets["gcp_static_maps"]["api_key"] if "gcp_static_maps" in st.secrets else None
         with st.spinner("Analyzing satellite imagery, nearby infrastructure, and weather..."):
-            result = run_assessment(latitude, longitude, resolved_address, places_api_key)
+            result = run_assessment(latitude, longitude, resolved_address, places_api_key, original_input)
 
         if result is None:
             st.error("No clear satellite image found for this location.")
@@ -872,6 +873,9 @@ if run_clicked:
             result["building_type"] = building_type
             result["geocode_source"] = geocode_source
             result["image_verification_status"] = "UNVERIFIED"
+            result["embedded_image_bytes"] = None
+            result["embedded_image_source"] = None
+            result["embedded_image_date"] = None
             st.session_state.result = result
             log_assessment(result)
 
@@ -885,6 +889,11 @@ if "result" in st.session_state and st.session_state.result:
     top_col1, top_col2 = st.columns([2.5, 1])
     with top_col1:
         st.write(f"**Location:** {result['resolved_address']}")
+        if result.get("address_possibly_truncated"):
+            st.warning(
+                "⚠️ The matched address looks less specific than what you entered — the exact "
+                "house/building number may have been dropped during lookup. Please verify manually."
+            )
         st.caption(
             f"Satellite image date: {result['image_date']} • "
             f"Cloud coverage: {result['cloud_pct']}% • "
@@ -892,6 +901,17 @@ if "result" in st.session_state and st.session_state.result:
         )
     with top_col2:
         st.markdown(f"#### Risk: :{risk_color}[{result['overall_label']} ({result['overall_percent']}%)]")
+
+    if not result.get("embedded_image_bytes"):
+        st.info("💡 Tip: view an image in 'Close-Up View' below before downloading, so it's included in your PDF report.")
+
+    pdf_buffer = generate_pdf_report(result)
+    st.download_button(
+        "Download PDF Report",
+        data=pdf_buffer,
+        file_name=f"RiskEye_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+        mime="application/pdf",
+    )
 
     st.write("")
     c1, c2, c3 = st.columns(3)
@@ -904,7 +924,7 @@ if "result" in st.session_state and st.session_state.result:
     with st.expander("Why was this recommended? (scoring breakdown)"):
         st.write(f"Flood score: **{result['flood_risk']}** → {score_of(result['flood_risk'])}/3")
         st.write(f"Terrain score: **{result['terrain_risk']}** → {score_of(result['terrain_risk'])}/3")
-        st.write(f"Overall label uses the higher of the two scores. Percent is the average of both, scaled to 100.")
+        st.write("Overall label uses the higher of the two scores. Percent is the average of both, scaled to 100.")
         st.caption("This is a simple, transparent rule-based average — not a statistically calibrated probability of loss.")
         st.write("**Specific triggers behind this recommendation:**")
         for trigger in result["inspection_triggers"]:
@@ -932,7 +952,8 @@ if "result" in st.session_state and st.session_state.result:
         for item in incidents:
             with st.container():
                 st.markdown(f"**[{item['title']}]({item['link']})**")
-                st.caption(f"Source: {item['link'].split('/')[2] if '/' in item['link'] else 'N/A'} • {item['date']}")
+                domain = item['link'].split('/')[2] if '://' in item['link'] and len(item['link'].split('/')) > 2 else 'N/A'
+                st.caption(f"Source: {domain} • {item['date']}")
                 st.write(item['snippet'])
                 st.divider()
     else:
@@ -940,6 +961,7 @@ if "result" in st.session_state and st.session_state.result:
 
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
     st.markdown("### Nearby Infrastructure")
+    st.caption("All counts use a 200m radius. Hospitals and schools are naturally sparser facilities — a result of 0 at this tight radius is common even where coverage exists just outside it.")
     hazards = result.get("hazards", {})
     h1, h2, h3, h4, h5 = st.columns(5)
 
@@ -949,29 +971,22 @@ if "result" in st.session_state and st.session_state.result:
     fr, fr_err = hazards.get("fire_stations"), hazards.get("fire_stations_error")
     pol, pol_err = hazards.get("police_stations"), hazards.get("police_stations_error")
 
-    h1.metric("Filling stations (200m)", fs if fs is not None else "N/A")
-    h2.metric("Fire stations (200m)", fr if fr is not None else "N/A")
-    h3.metric("Police stations (200m)", pol if pol is not None else "N/A")
-    h4.metric("Hospitals (200m)", hs if hs is not None else "N/A")
-    h5.metric("Schools (200m)", sc if sc is not None else "N/A")
-    st.caption(
-        "Infrastructure radius lookup: all facilities are checked within 200m for this screen. "
-        "A result of 0 does not necessarily mean no nearby coverage exists."
-    )
+    h1.metric("Filling stations", fs if fs is not None else "N/A")
+    h2.metric("Fire stations", fr if fr is not None else "N/A")
+    h3.metric("Police stations", pol if pol is not None else "N/A")
+    h4.metric("Hospitals", hs if hs is not None else "N/A")
+    h5.metric("Schools", sc if sc is not None else "N/A")
 
     st.write("")
     st.metric("Area character (inferred from business density)", result.get("area_character", "Unknown"))
     st.caption(
-        "This is separate from the 'Surroundings (land cover)' metric above: land cover comes from "
-        "satellite classification (vegetation, built-up, water, etc.), while area character is inferred "
-        "from nearby business density via Google Places. They measure different things and may not always "
-        "align. Neither is computer-vision detection of building types — RiskEye cannot currently look at "
-        "a building and determine if it is commercial or residential."
+        "This is separate from 'Surroundings (land cover)' above: land cover comes from satellite "
+        "classification, while area character comes from nearby business density via Google Places. "
+        "Neither is computer-vision detection of building types."
     )
 
     if fs_err or hs_err or sc_err or fr_err or pol_err:
         st.caption(f"⚠️ Some lookups had issues: {fs_err or ''} {hs_err or ''} {sc_err or ''} {fr_err or ''} {pol_err or ''}".strip())
-    st.caption("Counts from Google Places (within radius shown). Coverage is generally strong in major Nigerian cities.")
 
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
     st.markdown("### Weather Conditions")
@@ -997,14 +1012,11 @@ if "result" in st.session_state and st.session_state.result:
     else:
         w2.metric("Rainfall pattern", "Unavailable")
 
-    st.caption("Historical data reflects the last 12 months — a recent pattern, not a multi-year climate record.")
-
     st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
     st.markdown("### Close-Up View")
     st.warning(
-        "⚠️ **UNVERIFIED IMAGERY** — this image is retrieved automatically by coordinate match. "
-        "It has not been manually confirmed to show the actual insured building. Treat as indicative "
-        "only until verified by an underwriter or inspector."
+        "⚠️ **UNVERIFIED IMAGERY** — retrieved automatically by coordinate match, not manually "
+        "confirmed to show the actual insured building."
     )
     if result.get("overall_score", 1) >= 2:
         if "gcp_static_maps" in st.secrets:
@@ -1018,45 +1030,36 @@ if "result" in st.session_state and st.session_state.result:
             )
 
             if view_mode == "Interactive (pan/zoom)":
-                st.caption("Interactive Google satellite map — you can pan and zoom directly. Imagery date varies by tile and is not individually reported by Google's basemap service.")
+                st.caption("Interactive Google satellite map. Google's basemap does not report a per-tile capture date.")
                 render_interactive_google_map(result["latitude"], result["longitude"], api_key)
             elif view_mode == "Static image":
-                st.caption("Sharper close-up shown because this property is flagged Medium/High risk. Capture date not provided by this data source.")
+                st.caption("Google's Static Maps basemap does not report a per-image capture date — this is a limitation of the data source, not the app.")
                 image_bytes = get_static_map_image(result["latitude"], result["longitude"], api_key)
                 if image_bytes:
-                    result["static_image_bytes"] = image_bytes
-                    result["static_map_capture_date"] = "Capture date not provided by this data source"
-                    st.image(image_bytes, caption="Google satellite close-up (single image, not interactive) — UNVERIFIED — Capture date not provided by this data source")
+                    st.image(image_bytes, caption="Google satellite close-up — UNVERIFIED — capture date not provided by this source")
+                    st.session_state.result["embedded_image_bytes"] = image_bytes
+                    st.session_state.result["embedded_image_source"] = "Google Static Maps (satellite)"
+                    st.session_state.result["embedded_image_date"] = None
                 else:
                     st.caption("Close-up image could not be retrieved for this location.")
             elif view_mode == "Street View (if available)":
                 image_bytes, sv_status, sv_date = get_street_view_image(result["latitude"], result["longitude"], api_key)
-                result["street_view_checked"] = True
                 if image_bytes:
-                    result["street_view_image_bytes"] = image_bytes
-                    result["street_view_date"] = sv_date
-                    date_label = f"Captured: {sv_date}" if sv_date else "Capture date not provided by this data source"
-                    st.image(image_bytes, caption=f"Google Street View (ground-level) — UNVERIFIED — {date_label}")
+                    date_label = f"Captured: {sv_date}" if sv_date else "Capture date not reported"
+                    st.image(image_bytes, caption=f"Google Street View — UNVERIFIED — {date_label}")
+                    st.session_state.result["embedded_image_bytes"] = image_bytes
+                    st.session_state.result["embedded_image_source"] = "Google Street View"
+                    st.session_state.result["embedded_image_date"] = sv_date
                 else:
                     st.warning(
                         f"No Street View imagery available for this location (status: {sv_status}). "
-                        "This is common outside major Nigerian city centers, since Google's Street View "
-                        "cars have limited coverage in Nigeria. This limitation is noted in the PDF report."
+                        "Common outside major Nigerian city centers due to limited Street View coverage. "
+                        "This limitation is noted in the PDF report."
                     )
         else:
             st.caption("Close-up imagery is not configured for this deployment.")
     else:
         st.caption("Close-up image is only shown for properties flagged Medium or High risk (this one is Low).")
-
-    if "gcp_static_maps" in st.secrets:
-        result = populate_report_images(result, st.secrets["gcp_static_maps"]["api_key"])
-    pdf_buffer = generate_pdf_report(result)
-    st.download_button(
-        "Download PDF Report",
-        data=pdf_buffer,
-        file_name=f"RiskEye_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-        mime="application/pdf",
-    )
 
     if result.get("declared_value", 0) > 0:
         st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
@@ -1087,15 +1090,13 @@ if "result" in st.session_state and st.session_state.result:
                 st.success("Declared value appears broadly consistent with the estimated replacement cost.")
 
         st.caption(
-            "This is a rough, indicative estimate: built-up area is measured from satellite imagery "
-            "(an aerial footprint, not a ground survey or floor count), combined with a general construction "
-            "cost benchmark for the selected building type (structure only — excludes machinery, equipment, "
-            "and fittings). Not a certified valuation."
+            "This is a rough, indicative estimate: built-up area is measured from satellite imagery, "
+            "combined with a general construction cost benchmark for the selected building type. "
+            "Not a certified valuation."
         )
-
-    st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
+st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
     st.markdown("### Satellite View (Sentinel-2)")
-    st.caption(f"Image date: {result['image_date']} — Zoom using the + / − controls, or scroll while hovering. Sentinel-2 imagery has ~10m resolution, so individual buildings will appear blocky rather than sharp.")
+    st.caption(f"Image date: {result['image_date']} — ~10m resolution, so individual buildings appear blocky rather than sharp.")
 
     m = folium.Map(location=[result["latitude"], result["longitude"]], zoom_start=17, max_zoom=20)
     map_id_dict = ee.Image(result["best_image"]).getMapId(
@@ -1122,7 +1123,7 @@ if "result" in st.session_state and st.session_state.result:
 
 st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
 st.markdown("### Assessment History")
-st.caption("⚠️ History is stored temporarily on the app server and may be cleared when the app restarts. This is a lightweight log for demonstration, not permanent storage.")
+st.caption("⚠️ History is stored temporarily on the app server and may be cleared when the app restarts.")
 history = load_history()
 if history:
     st.dataframe(history, use_container_width=True)
